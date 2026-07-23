@@ -1,0 +1,35 @@
+# 本仓库是学习记录仓库，不保存本地运行数据、密钥或大体积产物。
+
+# 系统与编辑器
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# 密钥与本地配置
+.env
+.env.*
+*.key
+*.pem
+secrets/
+credentials/
+
+# Python / Node 缓存
+__pycache__/
+*.py[cod]
+node_modules/
+.venv/
+venv/
+
+# Docker / RAGFlow 本地运行数据
+ragflow-logs/
+mysql_data/
+minio_data/
+redis_data/
+esdata*/
+*.vhdx
+
+# 临时文件
+tmp/
+temp/
+*.log
