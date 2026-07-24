@@ -23,6 +23,8 @@
 - [x] API 端口可访问：`localhost:9380`
 - [x] 已确认本地 MySQL `3306` 冲突，并将 RAGFlow MySQL 暴露端口改为 `13306`。
 - [x] 已记录 `SubAPI / Responses API` 与 RAGFlow 当前 OpenAI-Compatible 接口的适配问题。
+- [x] 已完成 12345 工单 TSV 到脱敏 JSONL 的第一版数据管线。
+- [x] 已完成 1000 样本和 10 万样本的本地 BM25 风格检索 demo。
 - [ ] 配置一个同时支持 Chat Completions 与 Embeddings 的模型供应商。
 - [ ] 创建第一个数据集并完成一次文档解析实验。
 - [ ] 开始系统源码阅读。
@@ -38,7 +40,9 @@
 │   ├── 02-12周学习计划.md
 │   ├── 03-模型配置说明.md
 │   ├── 04-排障记录.md
-│   └── 05-源码阅读路线.md
+│   ├── 05-源码阅读路线.md
+│   ├── 06-12345工单RAG实现方案.md
+│   └── 07-本地检索Demo.md
 ├── labs/
 │   ├── README.md
 │   └── week-01.md

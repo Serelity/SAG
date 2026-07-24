@@ -70,6 +70,12 @@ class TestPiiRedactor(unittest.TestCase):
         self.assertEqual(text, "快递[业务编号]一直不更新")
         self.assertEqual(counts["alnum_id"], 1)
 
+    def test_redacts_name_after_explicit_name_label(self):
+        text, counts = redact_text("服务对象（姓名：李长泉，身份证：[身份证号]）反映拖欠工资")
+
+        self.assertEqual(text, "服务对象（姓名：[姓名]，身份证：[身份证号]）反映拖欠工资")
+        self.assertEqual(counts["name"], 1)
+
     def test_none_becomes_empty_text(self):
         text, counts = redact_text(None)
 
