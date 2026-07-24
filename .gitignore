@@ -33,3 +33,8 @@ esdata*/
 tmp/
 temp/
 *.log
+
+# Generated outputs: do not commit sample data, JSONL exports, or quality reports.
+outputs/
+*.jsonl
+*.quality.json
