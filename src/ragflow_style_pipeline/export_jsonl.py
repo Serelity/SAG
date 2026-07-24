@@ -13,6 +13,11 @@ def _row_has_expected_field_count(row):
     return None not in row and all(value is not None for value in row.values())
 
 
+def _document_has_polluted_text(document):
+    text = document.get("text", "")
+    return "\t" in text or "\\t" in text
+
+
 def export_tsv_to_jsonl(input_path, output_path, quality_report_path, limit=None):
     """Stream TSV rows into redacted JSONL documents and a quality report."""
     input_path = Path(input_path)
@@ -25,6 +30,7 @@ def export_tsv_to_jsonl(input_path, output_path, quality_report_path, limit=None
     rows_read = 0
     documents_written = 0
     rows_skipped_bad_field_count = 0
+    rows_skipped_polluted_text = 0
     redactions = Counter()
 
     with input_path.open("r", encoding="utf-8", newline="") as input_file, output_path.open(
@@ -41,6 +47,10 @@ def export_tsv_to_jsonl(input_path, output_path, quality_report_path, limit=None
                 continue
 
             document, counts = build_document(row)
+            if _document_has_polluted_text(document):
+                rows_skipped_polluted_text += 1
+                continue
+
             output_file.write(json.dumps(document, ensure_ascii=False) + "\n")
             documents_written += 1
             redactions.update(counts)
@@ -51,6 +61,7 @@ def export_tsv_to_jsonl(input_path, output_path, quality_report_path, limit=None
         "rows_read": rows_read,
         "documents_written": documents_written,
         "rows_skipped_bad_field_count": rows_skipped_bad_field_count,
+        "rows_skipped_polluted_text": rows_skipped_polluted_text,
         "redactions": dict(redactions),
     }
     quality_report_path.write_text(

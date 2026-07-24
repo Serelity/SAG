@@ -121,6 +121,31 @@ class TestExportJsonl(unittest.TestCase):
         self.assertEqual(report["documents_written"], 1)
         self.assertEqual(report["rows_skipped_bad_field_count"], 1)
 
+    def test_skips_documents_with_tab_polluted_text(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            input_path = Path(tmp_dir) / "polluted.tsv"
+            output = Path(tmp_dir) / "sample.jsonl"
+            quality_report = Path(tmp_dir) / "sample.quality.json"
+            input_path.write_text(
+                "id\torder_id\tservice_object_type\tcase_content\tcase_goal\n"
+                "1\tORD001\t求助\t正常内容\t目标\n"
+                "2\tORD002\t求助\t污染内容\\\\t后续字段混入\t目标\n",
+                encoding="utf-8",
+            )
+
+            report = export_tsv_to_jsonl(
+                input_path=input_path,
+                output_path=output,
+                quality_report_path=quality_report,
+            )
+
+            docs = output.read_text(encoding="utf-8").splitlines()
+
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(report["rows_read"], 2)
+        self.assertEqual(report["documents_written"], 1)
+        self.assertEqual(report["rows_skipped_polluted_text"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
