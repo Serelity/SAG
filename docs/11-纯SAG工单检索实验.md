@@ -199,13 +199,13 @@ cp /你的实际路径/t_order_master.tsv data/t_order_master.tsv：
 如果服务器还没有 DuckDB：
 
 ```bash
-pip install duckdb
+pip install -r requirements.sag.txt
 ```
 
 含义：
 
 ```text
-给当前 Python / conda 环境安装 DuckDB。
+给当前 Python / conda 环境安装纯 SAG 实验需要的依赖。
 DuckDB 是一个本地分析数据库，这里用它保存 event、entity 和 link 表。
 ```
 
