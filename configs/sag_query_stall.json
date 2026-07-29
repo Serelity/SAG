@@ -1,0 +1,28 @@
+{
+  "query_name": "stall",
+  "seed_entities": [
+    {
+      "entity_type": "problem_object",
+      "values": ["流动摊贩", "游商摊贩", "夜市摊贩", "摊贩", "小摊", "商贩"],
+      "operator": "OR"
+    },
+    {
+      "entity_type": "problem_behavior",
+      "values": ["摆摊", "设摊", "占道经营", "无照经营", "店外经营"],
+      "operator": "OR"
+    }
+  ],
+  "seed_group_operator": "AND",
+  "space_entities": [],
+  "filters": {
+    "call_month_gte": "2024-01",
+    "call_month_lte": "2024-12"
+  },
+  "expansion": {
+    "enabled": true,
+    "max_hops": 1,
+    "frontier_entity_types": ["street", "road", "intersection", "poi"],
+    "max_expanded_events": 2000
+  },
+  "representative_limit": 20
+}
