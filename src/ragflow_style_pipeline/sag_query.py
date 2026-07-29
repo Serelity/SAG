@@ -439,6 +439,7 @@ def analyze_sag_query(db_path, config):
                 rows_by_doc,
                 int(config.get("representative_limit", 10)),
             ),
+            "results": results,
             "retrieval": {
                 "db_path": str(db_path),
                 "elapsed_ms": round((time.time() - started_at) * 1000, 3),
