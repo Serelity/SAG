@@ -35,6 +35,13 @@ temp/
 *.log
 
 # Generated outputs: do not commit sample data, JSONL exports, or quality reports.
+data/
+models/
 outputs/
+packages/
+*.zip
 *.jsonl
 *.quality.json
+*.duckdb
+*.duckdb.wal
+*.npy

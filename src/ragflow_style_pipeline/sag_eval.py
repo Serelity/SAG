@@ -7,6 +7,7 @@ from pathlib import Path
 
 WEAK_GOLD_TYPE3 = {"无照经营游商", "店外经营", "无证照餐饮店"}
 WEAK_GOLD_KEYWORDS = ["流动摊贩", "游商摊贩", "摆摊", "设摊", "占道经营", "无照经营", "店外经营"]
+GENERIC_NOISE_VALUES = ["路", "街", "道路", "关于道路", "常州12345热线", "政风热线", "关于小区", "导致小区", "本人要求市场"]
 
 
 def _connect(db_path):
@@ -106,19 +107,35 @@ def build_manual_eval_samples(db_path, results, limit=100):
 
 
 def build_entity_eval_samples(db_path, limit=200):
-    """Return entity extraction samples for manual review."""
+    """Return stratified entity extraction samples for manual review."""
+    per_group_limit = max(1, int(limit) // 16)
     with _connect(db_path) as conn:
-        rows = conn.execute(
+        groups = conn.execute(
             """
-            select l.doc_id, l.entity_type, l.entity_value, l.source_field, l.source_channel,
-                   l.confidence, l.matched_text, s.case_content_clean, s.address_detail_clean
+            select entity_type, source_channel, count(*) as n
             from sag_event_entity_links l
-            left join source_orders s on s.doc_id = l.doc_id
-            order by l.entity_type, l.doc_id
-            limit ?
-            """,
-            [int(limit)],
+            group by entity_type, source_channel
+            order by entity_type, source_channel
+            """
         ).fetchall()
+
+        selected = []
+        for entity_type, source_channel, _count in groups:
+            rows = conn.execute(
+                """
+                select l.doc_id, l.entity_type, l.entity_value, l.source_field, l.source_channel,
+                       l.confidence, l.matched_text, s.case_content_clean, s.address_detail_clean
+                from sag_event_entity_links l
+                left join source_orders s on s.doc_id = l.doc_id
+                where l.entity_type = ? and l.source_channel = ?
+                order by l.doc_id, l.entity_value
+                limit ?
+                """,
+                [entity_type, source_channel, per_group_limit],
+            ).fetchall()
+            selected.extend(rows)
+            if len(selected) >= int(limit):
+                break
 
     return [
         {
@@ -134,8 +151,25 @@ def build_entity_eval_samples(db_path, limit=200):
             "label": "",
             "label_reason": "",
         }
-        for row in rows
+        for row in selected[: int(limit)]
     ]
+
+
+def count_generic_entity_noise(db_path):
+    """Count known generic entity noise values in the SAG links table."""
+    with _connect(db_path) as conn:
+        rows = conn.execute(
+            """
+            select entity_type, entity_value, count(*) as n
+            from sag_event_entity_links
+            group by entity_type, entity_value
+            """
+        ).fetchall()
+    counts = {}
+    for entity_type, entity_value, count in rows:
+        if entity_value in GENERIC_NOISE_VALUES:
+            counts[f"{entity_type}:{entity_value}"] = int(count)
+    return counts
 
 
 def _write_jsonl(path, rows):
@@ -185,6 +219,7 @@ def main(argv=None):
                 "manual_samples_written": len(manual_samples),
                 "entity_samples": str(args.entity_samples),
                 "entity_samples_written": len(entity_samples),
+                "generic_entity_noise": count_generic_entity_noise(args.db),
             },
             ensure_ascii=False,
             indent=2,

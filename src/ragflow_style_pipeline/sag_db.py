@@ -7,7 +7,12 @@ import json
 import time
 from pathlib import Path
 
-from ragflow_style_pipeline.sag_entities import clean_value, extract_entities_from_order
+from ragflow_style_pipeline.sag_entities import (
+    SagEntityLink,
+    clean_value,
+    deduplicate_entity_links,
+    extract_entities_from_order,
+)
 
 
 SOURCE_ORDER_COLUMNS = [
@@ -235,7 +240,33 @@ def _insert_rows(conn, table_name, columns, rows):
     )
 
 
-def build_sag_db_from_orders(source_orders, db_path):
+def load_entity_links_jsonl(path):
+    """Load externally extracted SagEntityLink JSONL rows grouped by doc_id."""
+    path = Path(path)
+    links_by_doc = {}
+    if not path.exists():
+        return links_by_doc
+    with path.open("r", encoding="utf-8") as input_file:
+        for line in input_file:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            link = SagEntityLink(
+                doc_id=clean_value(row.get("doc_id")),
+                entity_type=clean_value(row.get("entity_type")),
+                entity_value=clean_value(row.get("entity_value")),
+                normalized_value=clean_value(row.get("normalized_value")) or clean_value(row.get("entity_value")),
+                source_field=clean_value(row.get("source_field")) or "case_content_clean",
+                source_channel=clean_value(row.get("source_channel")) or "llm",
+                confidence=float(row.get("confidence") or 0.0),
+                matched_text=clean_value(row.get("matched_text")) or clean_value(row.get("entity_value")),
+            )
+            if link.doc_id and link.entity_type and link.normalized_value:
+                links_by_doc.setdefault(link.doc_id, []).append(link)
+    return links_by_doc
+
+
+def build_sag_db_from_orders(source_orders, db_path, extra_entity_links_by_doc=None):
     """Create DuckDB SAG-lite tables from normalized source orders."""
     import duckdb
 
@@ -247,7 +278,9 @@ def build_sag_db_from_orders(source_orders, db_path):
     entity_rows_by_key = {}
     link_rows = []
     for order in source_orders:
-        for link in extract_entities_from_order(order):
+        rule_links = extract_entities_from_order(order)
+        extra_links = (extra_entity_links_by_doc or {}).get(order["doc_id"], [])
+        for link in deduplicate_entity_links(rule_links + extra_links):
             entity_id = _entity_id(link.entity_type, link.normalized_value)
             entity_key = (link.entity_type, link.normalized_value)
             entity_rows_by_key.setdefault(
@@ -308,11 +341,14 @@ def build_sag_db_from_orders(source_orders, db_path):
     }
 
 
-def build_sag_db(input_path, db_path, limit=None):
+def build_sag_db(input_path, db_path, limit=None, entity_links_jsonl=""):
     """Read source rows and create a pure SAG-lite DuckDB database."""
     rows = read_source_rows(input_path, limit=limit)
-    report = build_sag_db_from_orders(rows, db_path)
+    extra_links = load_entity_links_jsonl(entity_links_jsonl) if entity_links_jsonl else None
+    report = build_sag_db_from_orders(rows, db_path, extra_entity_links_by_doc=extra_links)
     report["input_path"] = str(input_path)
+    if entity_links_jsonl:
+        report["entity_links_jsonl"] = str(entity_links_jsonl)
     return report
 
 
@@ -321,12 +357,13 @@ def parse_args(argv=None):
     parser.add_argument("--input", required=True, help="Input t_order_master.tsv or multiview JSONL.")
     parser.add_argument("--db", required=True, help="Output DuckDB database path.")
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit.")
+    parser.add_argument("--entity-links-jsonl", default="", help="Optional LLM SagEntityLink JSONL to merge into the SAG database.")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    report = build_sag_db(args.input, args.db, args.limit)
+    report = build_sag_db(args.input, args.db, args.limit, args.entity_links_jsonl)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

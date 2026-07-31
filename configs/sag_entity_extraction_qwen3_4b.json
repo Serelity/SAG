@@ -1,0 +1,23 @@
+{
+  "model_id": "Qwen/Qwen3-4B",
+  "model_path": "models/Qwen3-4B",
+  "download_backend": "modelscope",
+  "enable_thinking": false,
+  "max_text_chars": 1500,
+  "max_new_tokens": 256,
+  "temperature": 0.0,
+  "min_confidence": 0.55,
+  "batch_size": 16,
+  "progress_every": 16,
+  "allowed_entity_types": [
+    "problem_object",
+    "problem_behavior",
+    "area",
+    "street",
+    "road",
+    "intersection",
+    "poi"
+  ],
+  "default_output": "outputs/sag_lite.entity_links.llm.100k.jsonl",
+  "default_rejects": "outputs/sag_lite.entity_links.llm.rejects.100k.jsonl"
+}

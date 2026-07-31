@@ -40,6 +40,37 @@ class TestLocalSearch(unittest.TestCase):
             self.assertEqual(len(documents), 1)
             self.assertEqual(documents[0]["doc_id"], "doc_1")
 
+    def test_load_documents_preserves_multiview_fields(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "docs.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "doc_id": "order_a",
+                        "case_content_clean": "流动摊贩占道经营",
+                        "case_goal_clean": "希望清理",
+                        "embedding_text": "诉求内容：流动摊贩占道经营",
+                        "display_text": "诉求内容：流动摊贩占道经营\n所属区域：常州市 / 武进区",
+                        "text": "诉求内容：流动摊贩占道经营\n所属区域：常州市 / 武进区",
+                        "metadata": {"area_code_area": "武进区"},
+                        "derived": {"topic_tags": []},
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            documents = load_documents(path)
+
+            self.assertEqual(documents[0]["case_content_clean"], "流动摊贩占道经营")
+            self.assertEqual(documents[0]["embedding_text"], "诉求内容：流动摊贩占道经营")
+            self.assertEqual(
+                documents[0]["display_text"],
+                "诉求内容：流动摊贩占道经营\n所属区域：常州市 / 武进区",
+            )
+            self.assertEqual(documents[0]["derived"], {"topic_tags": []})
+
     def test_search_ranks_more_relevant_document_first(self):
         documents = [
             _doc("salary", "诉求内容：工地拖欠工资，工资一直未发。业务分类：民生保障"),

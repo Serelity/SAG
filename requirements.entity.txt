@@ -1,0 +1,4 @@
+accelerate>=1.8.0
+modelscope>=1.27.0
+transformers>=4.53.0
+tqdm>=4.66.0

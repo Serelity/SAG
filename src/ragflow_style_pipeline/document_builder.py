@@ -27,22 +27,29 @@ def _join_non_empty(values, separator):
     return separator.join(value for value in values if value)
 
 
-def build_text(row):
-    """Create the retrievable text body for one order row."""
+def build_case_content(row):
+    """Return the normalized raw complaint/request content."""
+    return clean_value(row.get("case_content"))
+
+
+def build_case_goal(row):
+    """Return the normalized request goal."""
+    return clean_value(row.get("case_goal"))
+
+
+def build_embedding_text_from_parts(case_content, case_goal):
+    """Build the text that dense embedding models should encode."""
     lines = []
-
-    service_object_type = clean_value(row.get("service_object_type"))
-    case_content = clean_value(row.get("case_content"))
-    case_goal = clean_value(row.get("case_goal"))
-
-    if service_object_type:
-        lines.append(f"诉求类型：{service_object_type}")
     if case_content:
         lines.append(f"诉求内容：{case_content}")
     if case_goal:
         lines.append(f"诉求目标：{case_goal}")
+    return "\n".join(lines)
 
-    category = _join_non_empty(
+
+def build_category(row):
+    """Return the normalized business category path."""
+    return _join_non_empty(
         [
             clean_value(row.get("case_accord_type_one_name")),
             clean_value(row.get("case_accord_type_two_name")),
@@ -50,10 +57,11 @@ def build_text(row):
         ],
         " / ",
     )
-    if category:
-        lines.append(f"业务分类：{category}")
 
-    area = _join_non_empty(
+
+def build_area(row):
+    """Return the normalized area path."""
+    return _join_non_empty(
         [
             clean_value(row.get("area_code_city")),
             clean_value(row.get("area_code_area")),
@@ -61,18 +69,67 @@ def build_text(row):
         ],
         " / ",
     )
+
+
+def build_display_text_from_parts(
+    service_object_type,
+    case_content,
+    case_goal,
+    category,
+    area,
+    call_time,
+    order_source,
+):
+    """Create display text from already normalized or redacted parts."""
+    lines = []
+
+    if service_object_type:
+        lines.append(f"诉求类型：{service_object_type}")
+    if case_content:
+        lines.append(f"诉求内容：{case_content}")
+    if case_goal:
+        lines.append(f"诉求目标：{case_goal}")
+    if category:
+        lines.append(f"业务分类：{category}")
     if area:
         lines.append(f"所属区域：{area}")
-
-    call_time = clean_value(row.get("call_time"))
     if call_time:
         lines.append(f"来电时间：{call_time}")
-
-    order_source = clean_value(row.get("order_source"))
     if order_source:
         lines.append(f"来源渠道：{order_source}")
 
     return "\n".join(lines)
+
+
+def build_display_text(row):
+    """Create the text shown to humans and later provided to LLM context."""
+    return build_display_text_from_parts(
+        service_object_type=clean_value(row.get("service_object_type")),
+        case_content=build_case_content(row),
+        case_goal=build_case_goal(row),
+        category=build_category(row),
+        area=build_area(row),
+        call_time=clean_value(row.get("call_time")),
+        order_source=clean_value(row.get("order_source")),
+    )
+
+
+def build_text(row):
+    """Backward-compatible full display text for one order row."""
+    return build_display_text(row)
+
+
+def build_derived():
+    """Return reserved derived fields for future text analytics."""
+    return {
+        "topic_tags": [],
+        "keywords": [],
+        "semantic_cluster_id": "",
+        "problem_object": "",
+        "problem_behavior": "",
+        "location_mention": "",
+        "appeal_action": "",
+    }
 
 
 def build_metadata(row):
@@ -107,10 +164,38 @@ def build_doc_id(row):
 
 
 def build_document(row):
-    """Build one JSONL-ready RAG document and redaction statistics."""
+    """Build one JSONL-ready multi-view RAG document and redaction statistics."""
     counts = Counter()
-    text, text_counts = redact_text(build_text(row))
-    counts.update(text_counts)
+
+    case_content, case_content_counts = redact_text(build_case_content(row))
+    counts.update(case_content_counts)
+
+    case_goal, case_goal_counts = redact_text(build_case_goal(row))
+    counts.update(case_goal_counts)
+
+    display_parts = {}
+    for key, value in {
+        "service_object_type": clean_value(row.get("service_object_type")),
+        "category": build_category(row),
+        "area": build_area(row),
+        "call_time": clean_value(row.get("call_time")),
+        "order_source": clean_value(row.get("order_source")),
+    }.items():
+        redacted_value, value_counts = redact_text(value)
+        display_parts[key] = redacted_value
+        counts.update(value_counts)
+
+    display_text = build_display_text_from_parts(
+        service_object_type=display_parts["service_object_type"],
+        case_content=case_content,
+        case_goal=case_goal,
+        category=display_parts["category"],
+        area=display_parts["area"],
+        call_time=display_parts["call_time"],
+        order_source=display_parts["order_source"],
+    )
+
+    embedding_text = build_embedding_text_from_parts(case_content, case_goal)
 
     metadata = build_metadata(row)
     redacted_metadata = {}
@@ -119,4 +204,16 @@ def build_document(row):
         redacted_metadata[key] = redacted_value
         counts.update(value_counts)
 
-    return {"doc_id": build_doc_id(row), "text": text, "metadata": redacted_metadata}, counts
+    return (
+        {
+            "doc_id": build_doc_id(row),
+            "case_content_clean": case_content,
+            "case_goal_clean": case_goal,
+            "embedding_text": embedding_text,
+            "display_text": display_text,
+            "text": display_text,
+            "metadata": redacted_metadata,
+            "derived": build_derived(),
+        },
+        counts,
+    )

@@ -6,10 +6,18 @@ from pathlib import Path
 from ragflow_style_pipeline.sag_db import (
     build_sag_db_from_orders,
     event_row,
+    load_entity_links_jsonl,
     read_source_rows,
     source_order_row,
     stable_hash,
 )
+
+
+def _skip_without_duckdb(testcase):
+    try:
+        import duckdb  # noqa: F401
+    except ModuleNotFoundError:
+        testcase.skipTest("duckdb is not installed in the local test runtime")
 
 
 class TestSagDbMapping(unittest.TestCase):
@@ -117,10 +125,8 @@ class TestSagDbMapping(unittest.TestCase):
 
 class TestSagDbBuild(unittest.TestCase):
     def test_build_sag_db_from_orders_creates_events_entities_and_links(self):
-        try:
-            import duckdb
-        except ModuleNotFoundError:
-            self.skipTest("duckdb is not installed in the local test runtime")
+        _skip_without_duckdb(self)
+        import duckdb
 
         orders = [
             source_order_row(
@@ -153,6 +159,55 @@ class TestSagDbBuild(unittest.TestCase):
         self.assertEqual(event_count, 1)
         self.assertGreater(entity_count, 0)
         self.assertGreaterEqual(road_count, 1)
+
+    def test_build_db_merges_llm_entity_links(self):
+        _skip_without_duckdb(self)
+        import duckdb
+
+        order = source_order_row(
+            {
+                "id": "1",
+                "order_id": "ORD001",
+                "case_content": "市民反映广成路有卖菜摊子挡住人行道。",
+                "case_goal": "希望处理",
+                "call_time": "2024-05-01 10:00:00",
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            links_path = tmp / "llm_links.jsonl"
+            links_path.write_text(
+                json.dumps(
+                    {
+                        "doc_id": order["doc_id"],
+                        "entity_type": "problem_object",
+                        "entity_value": "流动摊贩",
+                        "normalized_value": "流动摊贩",
+                        "source_field": "case_content_clean",
+                        "source_channel": "llm",
+                        "confidence": 0.8,
+                        "matched_text": "卖菜摊子",
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            db_path = tmp / "sag.duckdb"
+            build_sag_db_from_orders([order], db_path, extra_entity_links_by_doc=load_entity_links_jsonl(links_path))
+
+            conn = duckdb.connect(str(db_path))
+            rows = conn.execute(
+                """
+                select entity_type, entity_value, source_channel
+                from sag_event_entity_links
+                where doc_id = ? and source_channel = 'llm'
+                """,
+                [order["doc_id"]],
+            ).fetchall()
+
+        self.assertEqual(rows, [("problem_object", "流动摊贩", "llm")])
 
 
 if __name__ == "__main__":

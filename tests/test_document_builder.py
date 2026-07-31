@@ -36,6 +36,49 @@ class TestDocumentBuilder(unittest.TestCase):
         self.assertEqual(doc["metadata"]["call_month"], "2025-01")
         self.assertEqual(counts["phone"], 1)
 
+    def test_builds_multiview_document_fields(self):
+        phone = "138" + "0013" + "8000"
+        row = {
+            "id": "10",
+            "order_id": "ORD010",
+            "service_object_type": "投诉举报",
+            "case_content": "市民反映手机号" + phone + "附近有流动摊贩占道经营",
+            "case_goal": "希望执法部门清理流动摊贩",
+            "area_code_city": "常州市",
+            "area_code_area": "武进区",
+            "area_code_street": "丁堰街道",
+            "case_accord_type_one_name": "城乡建设",
+            "case_accord_type_two_name": "市容管理",
+            "case_accord_type_three_name": "无照经营游商",
+            "order_source": "互联网",
+            "order_type": "个人",
+            "order_status": "25",
+            "call_time": "2024-06-11 20:51:18",
+        }
+
+        doc, counts = build_document(row)
+
+        self.assertEqual(
+            doc["case_content_clean"],
+            "市民反映手机号[手机号]附近有流动摊贩占道经营",
+        )
+        self.assertEqual(doc["case_goal_clean"], "希望执法部门清理流动摊贩")
+        self.assertEqual(
+            doc["embedding_text"],
+            (
+                "诉求内容：市民反映手机号[手机号]附近有流动摊贩占道经营\n"
+                "诉求目标：希望执法部门清理流动摊贩"
+            ),
+        )
+        self.assertIn("业务分类：城乡建设 / 市容管理 / 无照经营游商", doc["display_text"])
+        self.assertIn("所属区域：常州市 / 武进区 / 丁堰街道", doc["display_text"])
+        self.assertEqual(doc["text"], doc["display_text"])
+        self.assertEqual(doc["metadata"]["area_code_area"], "武进区")
+        self.assertEqual(doc["metadata"]["call_month"], "2024-06")
+        self.assertEqual(doc["derived"]["topic_tags"], [])
+        self.assertEqual(doc["derived"]["semantic_cluster_id"], "")
+        self.assertEqual(counts["phone"], 1)
+
     def test_skips_null_text_fields(self):
         row = {
             "id": "3",

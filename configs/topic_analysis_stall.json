@@ -1,0 +1,13 @@
+{
+  "query": "流动摆摊 占道经营 游商摊贩 夜市摊贩 无照经营",
+  "top_n": 1000,
+  "score_threshold": 0.0,
+  "representative_limit": 10,
+  "filters": {
+    "call_month_gte": "2024-01",
+    "call_month_lte": "2024-12",
+    "area_code_area_in": [],
+    "area_code_street_in": [],
+    "type3_in": []
+  }
+}

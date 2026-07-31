@@ -21,11 +21,17 @@ def load_documents(jsonl_path, limit=None):
             if not line.strip():
                 continue
             document = json.loads(line)
+            text = str(document.get("text") or document.get("display_text") or "")
             documents.append(
                 {
                     "doc_id": str(document.get("doc_id", f"line_{line_number}")),
-                    "text": str(document.get("text", "")),
+                    "text": text,
+                    "display_text": str(document.get("display_text") or text),
+                    "embedding_text": str(document.get("embedding_text", "")),
+                    "case_content_clean": str(document.get("case_content_clean", "")),
+                    "case_goal_clean": str(document.get("case_goal_clean", "")),
                     "metadata": dict(document.get("metadata", {})),
+                    "derived": dict(document.get("derived", {})),
                 }
             )
     return documents
