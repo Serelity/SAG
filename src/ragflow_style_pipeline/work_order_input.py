@@ -32,6 +32,8 @@ def content_hash(order):
 
 
 def normalize_work_order(document):
+    if not isinstance(document, dict):
+        raise WorkOrderInputError("invalid_document_type")
     metadata = document.get("metadata") if isinstance(document.get("metadata"), dict) else {}
     legacy_text = clean_value(document.get("text"))
     order = {
@@ -55,6 +57,10 @@ def normalize_work_order(document):
 
 
 def read_work_orders(path, limit=None):
+    if limit is not None and limit < 0:
+        raise WorkOrderInputError("invalid_limit")
+    if limit == 0:
+        return []
     rows = []
     with Path(path).open("r", encoding="utf-8") as source:
         for line_number, line in enumerate(source, 1):

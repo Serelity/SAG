@@ -48,3 +48,26 @@ class TestWorkOrderInput(unittest.TestCase):
             ]) + "\n", encoding="utf-8")
             rows = read_work_orders(path, limit=1)
         self.assertEqual([row["doc_id"] for row in rows], ["a"])
+
+    def test_handles_zero_and_negative_limits_at_input_boundary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "orders.jsonl"
+            path.write_text(
+                json.dumps({"doc_id": "a", "case_content_clean": "第一条脱敏工单"}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(read_work_orders(path, limit=0), [])
+            with self.assertRaisesRegex(WorkOrderInputError, "^invalid_limit$"):
+                read_work_orders(path, limit=-1)
+
+    def test_rejects_non_object_json_with_line_number(self):
+        for document in (None, "not an object", []):
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(WorkOrderInputError, "^invalid_document_type$"):
+                    normalize_work_order(document)
+
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    path = Path(tmpdir) / "orders.jsonl"
+                    path.write_text(json.dumps(document) + "\n", encoding="utf-8")
+                    with self.assertRaisesRegex(WorkOrderInputError, "^line_1:invalid_document_type$"):
+                        read_work_orders(path)
