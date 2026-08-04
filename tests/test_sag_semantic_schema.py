@@ -62,6 +62,14 @@ class TestSemanticSchema(unittest.TestCase):
         self.assertEqual(parsed["event_summary"], '含有 {括号} 和 "引号"')
         self.assertEqual(warnings, [])
 
+    def test_skips_balanced_invalid_braces_before_valid_object(self):
+        parsed, warnings = parse_semantic_json(
+            '说明 {not-json} result='
+            '{"event_summary":"ok","entities":{},"discourse":{}}'
+        )
+        self.assertEqual(parsed["event_summary"], "ok")
+        self.assertEqual(warnings, [])
+
     def test_normalizes_stable_entity_groups_items_and_limits(self):
         value = {
             "event_summary": 123,

@@ -208,14 +208,43 @@ def _strip_single_fence(text):
 
 
 def _first_json_object(text):
-    start = text.find("{")
-    if start < 0:
-        return None
-    try:
-        value, _ = json.JSONDecoder().raw_decode(text, start)
-    except json.JSONDecodeError:
-        return None
-    return value if isinstance(value, dict) else None
+    search_from = 0
+    while True:
+        start = text.find("{", search_from)
+        if start < 0:
+            return None
+
+        depth = 0
+        in_string = False
+        escaped = False
+        for end in range(start, len(text)):
+            current = text[end]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif current == "\\":
+                    escaped = True
+                elif current == '"':
+                    in_string = False
+                continue
+            if current == '"':
+                in_string = True
+            elif current == "{":
+                depth += 1
+            elif current == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        value = json.loads(text[start:end + 1])
+                    except json.JSONDecodeError:
+                        search_from = end + 1
+                        break
+                    if isinstance(value, dict):
+                        return value
+                    search_from = end + 1
+                    break
+        else:
+            return None
 
 
 def parse_semantic_json(text):
