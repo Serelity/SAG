@@ -47,6 +47,13 @@ class TestSemanticSchema(unittest.TestCase):
         self.assertEqual(parsed, normalize_semantic_output({}))
         self.assertEqual(warnings, ["json_parse_failed"])
 
+    def test_does_not_recover_nested_object_from_truncated_outer_object(self):
+        parsed, warnings = parse_semantic_json(
+            '{"event_summary":"truncated","entities":{"roads":[]}'
+        )
+        self.assertEqual(parsed, normalize_semantic_output({}))
+        self.assertEqual(warnings, ["json_parse_failed"])
+
     def test_extracts_first_complete_object_from_surrounding_text(self):
         parsed, warnings = parse_semantic_json(
             '模型说明 result={"event_summary":"含有 {括号} 和 \\"引号\\"",'
@@ -130,6 +137,15 @@ class TestSemanticSchema(unittest.TestCase):
             "malformed_satisfaction",
             "malformed_urgency",
         ])
+
+    def test_warns_for_malformed_top_level_containers_in_stable_order(self):
+        parsed, warnings = parse_semantic_json(
+            '{"entities":"bad","discourse":[]}'
+        )
+        defaults = normalize_semantic_output({})
+        self.assertEqual(parsed["entities"], defaults["entities"])
+        self.assertEqual(parsed["discourse"], defaults["discourse"])
+        self.assertEqual(warnings, ["malformed_entities", "malformed_discourse"])
 
     def test_coerces_malformed_discourse_arrays(self):
         parsed, warnings = parse_semantic_json('''{

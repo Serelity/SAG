@@ -171,12 +171,18 @@ def _normalize_urgency(value, warnings):
 def _normalize(value):
     warnings = []
     value = _without_confidence(value) if isinstance(value, dict) else {}
-    discourse = value.get("discourse")
-    discourse = discourse if isinstance(discourse, dict) else {}
+    entities = value.get("entities", {})
+    if not isinstance(entities, dict):
+        _warn(warnings, "malformed_entities")
+        entities = {}
+    discourse = value.get("discourse", {})
+    if not isinstance(discourse, dict):
+        _warn(warnings, "malformed_discourse")
+        discourse = {}
 
     normalized = {
         "event_summary": _text(value.get("event_summary")),
-        "entities": _normalize_entities(value.get("entities"), warnings),
+        "entities": _normalize_entities(entities, warnings),
         "discourse": {
             "intents": _normalize_intents(discourse.get("intents", []), warnings),
             "emotions": _normalize_emotions(discourse.get("emotions", []), warnings),
@@ -202,37 +208,14 @@ def _strip_single_fence(text):
 
 
 def _first_json_object(text):
-    for start, character in enumerate(text):
-        if character != "{":
-            continue
-        depth = 0
-        in_string = False
-        escaped = False
-        for end in range(start, len(text)):
-            current = text[end]
-            if in_string:
-                if escaped:
-                    escaped = False
-                elif current == "\\":
-                    escaped = True
-                elif current == '"':
-                    in_string = False
-                continue
-            if current == '"':
-                in_string = True
-            elif current == "{":
-                depth += 1
-            elif current == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        value = json.loads(text[start:end + 1])
-                    except json.JSONDecodeError:
-                        break
-                    if isinstance(value, dict):
-                        return value
-                    break
-    return None
+    start = text.find("{")
+    if start < 0:
+        return None
+    try:
+        value, _ = json.JSONDecoder().raw_decode(text, start)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
 
 
 def parse_semantic_json(text):
