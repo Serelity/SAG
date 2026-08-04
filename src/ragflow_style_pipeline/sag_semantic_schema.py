@@ -62,6 +62,11 @@ def _normalize_entity_item(item):
     source_field = item.get("source_field")
     if not isinstance(source_field, str):
         source_field = item.get("field")
+    if isinstance(source_field, str) and (
+        source_field == "case_content_windows"
+        or source_field.startswith("case_content_windows.")
+    ):
+        source_field = "case_content_clean"
     return {
         "surface": _text(item.get("surface")),
         "canonical": _text(item.get("canonical")),

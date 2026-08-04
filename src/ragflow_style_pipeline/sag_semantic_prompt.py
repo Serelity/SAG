@@ -206,11 +206,21 @@ def _safe_metadata(order):
 
 def _semantic_payload(order, config, include_metadata=True):
     order = order if isinstance(order, dict) else {}
+    windows = _window_payload(order, _max_input_chars(config))
     payload = {
         "title_clean": _text(order.get("title_clean")),
-        "case_content_windows": _window_payload(order, _max_input_chars(config)),
+        # Keep the model-facing field name identical to the source/validator
+        # contract. Window selection changes the value, never the field path.
+        "case_content_clean": windows["head"] + windows["current_window"] + windows["tail"],
         "case_goal_clean": _text(order.get("case_goal_clean")),
         "address_detail_clean": _text(order.get("address_detail_clean")),
+        "input_window_info": {
+            "truncated": windows["input_truncated"],
+            "original_chars": windows["original_chars"],
+            "kept_chars": windows["kept_chars"],
+            "history_markers_present": windows["history_markers_present"],
+            "current_markers_present": windows["current_markers_present"],
+        },
     }
     if include_metadata:
         payload["metadata_context"] = _safe_metadata(order)
@@ -220,7 +230,8 @@ def _semantic_payload(order, config, include_metadata=True):
 _RULES = """你是面向 SAG 检索的 12345 工单语义结构化器，不是普通关键词抽取器。请对任意业务领域做开放式识别。
 
 字段语义：
-- title_clean 是脱敏标题；case_content_windows 是诉求正文的有界窗口；case_goal_clean 是诉求人希望采取的动作；address_detail_clean 是地址补充。
+- title_clean 是脱敏标题；case_content_clean 是经过长度窗口裁剪后仍使用原字段名的诉求正文；case_goal_clean 是诉求人希望采取的动作；address_detail_clean 是地址补充。
+- input_window_info 仅描述是否截断及历史/当前标记，不是 evidence 字段。实体 field 绝不能填写 input_window_info 或其子字段。
 - metadata_context 只作登记背景，不得覆盖正文当前事实、当前立场或推断意图。
 - event_summary 应语义完整地概括当前核心事件，优先最新事实、立场和诉求，建议不超过 80 个汉字；咨询、建议、表扬不得强行制造问题。
 

@@ -70,6 +70,27 @@ class TestSemanticSchema(unittest.TestCase):
         self.assertEqual(parsed["event_summary"], "ok")
         self.assertEqual(warnings, [])
 
+    def test_normalizes_legacy_window_source_paths_to_case_content(self):
+        for field in (
+            "case_content_windows",
+            "case_content_windows.head",
+            "case_content_windows.current_window",
+            "case_content_windows.tail",
+            "case_content_windows.combined",
+        ):
+            with self.subTest(field=field):
+                parsed, warnings = parse_semantic_json(__import__("json").dumps({
+                    "entities": {"problem_objects": [{
+                        "surface": "路灯", "canonical": "路灯",
+                        "field": field, "evidence": "路灯",
+                    }]},
+                }, ensure_ascii=False))
+                self.assertEqual(
+                    parsed["entities"]["problem_objects"][0]["source_field"],
+                    "case_content_clean",
+                )
+                self.assertEqual(warnings, [])
+
     def test_normalizes_stable_entity_groups_items_and_limits(self):
         value = {
             "event_summary": 123,

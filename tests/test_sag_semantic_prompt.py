@@ -134,6 +134,21 @@ class TestSemanticPrompt(unittest.TestCase):
         self.assertIn("只输出最终 JSON", prompt)
         self.assertIn("不要输出分析过程、推理步骤或思维链", prompt)
 
+    def test_prompt_keeps_windowed_body_under_valid_source_field(self):
+        order = {
+            "case_content_clean": "前期反映" + "历史答复" * 100 + "现服务对象表示仍未解决。",
+        }
+        prompt = build_semantic_prompt(order, {"max_input_chars": 80})
+        payload_marker = "当前脱敏工单 payload：\n"
+        payload_text = prompt.split(payload_marker, 1)[1].split("\n\n请在内部", 1)[0]
+        payload = json.loads(payload_text)
+
+        self.assertIn("case_content_clean", payload)
+        self.assertNotIn("case_content_windows", payload)
+        self.assertLessEqual(len(payload["case_content_clean"]), 80)
+        self.assertTrue(payload["input_window_info"]["truncated"])
+        self.assertIn("field 绝不能填写 input_window_info", prompt)
+
     def test_prompt_labels_history_and_current_markers_without_rule_assertion(self):
         order = {
             "case_content_clean": "前期反映噪声。部门答复已处理，现再次反映仍未解决。",
@@ -145,7 +160,7 @@ class TestSemanticPrompt(unittest.TestCase):
         for marker in ("现再次反映", "仍未解决"):
             self.assertIn(marker, CURRENT_MARKERS)
             self.assertIn(marker, prompt)
-        self.assertIn('"input_truncated": true', prompt)
+        self.assertIn('"truncated": true', prompt)
 
     def test_primary_prompt_only_includes_allowlisted_metadata_context(self):
         prompt = build_semantic_prompt({
@@ -190,6 +205,8 @@ class TestSemanticPrompt(unittest.TestCase):
         self.assertNotIn("metadata", prompt)
         self.assertNotIn("safe_order_id", prompt)
         self.assertNotIn('"confidence"', prompt)
+        self.assertIn('"case_content_clean"', prompt)
+        self.assertNotIn('"case_content_windows"', prompt)
 
     def test_runtime_config_matches_approved_values_exactly(self):
         path = Path(__file__).parents[1] / "configs" / "sag_semantic_extraction_qwen3_4b.json"
