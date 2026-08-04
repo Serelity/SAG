@@ -1,0 +1,18 @@
+{
+  "schema_version": "2.0",
+  "prompt_version": "sag_semantic_v2",
+  "model_id": "Qwen/Qwen3-4B",
+  "model_path": "models/Qwen3-4B",
+  "backend": "transformers",
+  "enable_thinking": false,
+  "max_input_chars": 2200,
+  "max_new_tokens": 512,
+  "temperature": 0.0,
+  "batch_size": 8,
+  "progress_every": 50,
+  "checkpoint_every": 50,
+  "max_repairs_per_order": 1,
+  "length_bucket_boundaries": [600, 1400],
+  "default_output": "outputs/work_order_semantics.qwen3_4b.jsonl",
+  "default_rejects": "outputs/work_order_semantics.rejects.jsonl"
+}
