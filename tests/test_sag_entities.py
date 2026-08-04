@@ -9,6 +9,15 @@ from ragflow_style_pipeline.sag_entities import (
 
 
 class TestSagEntities(unittest.TestCase):
+    def test_keeps_road_name_starting_with_connector_character(self):
+        links = extract_entities_from_order(
+            {"doc_id": "order_road", "case_content_clean": "和平路路灯不亮"}
+        )
+        roads = {link.normalized_value for link in links if link.entity_type == "road"}
+
+        self.assertIn("和平路", roads)
+        self.assertNotIn("平路", roads)
+
     def test_normalize_entity_value_removes_spaces(self):
         self.assertEqual(normalize_entity_value(" 永红街道 "), "永红街道")
         self.assertEqual(normalize_entity_value("广成 路"), "广成路")

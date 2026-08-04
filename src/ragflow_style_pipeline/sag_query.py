@@ -110,7 +110,7 @@ def _seed_event_ids(conn, config):
             from sag_event_entity_links l
             join sag_events e on e.event_id = l.event_id
             where l.entity_type = ?
-              and replace(l.entity_value, ' ', '') in ({placeholders})
+              and replace(l.normalized_value, ' ', '') in ({placeholders})
             """,
             [entity_type] + values,
         ).fetchall()

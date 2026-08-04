@@ -38,7 +38,7 @@ PROBLEM_BEHAVIOR_TERMS = [
     "油烟",
 ]
 
-ROAD_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]{1,12}(?:路|街|大道|巷|弄|桥|线)")
+ROAD_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]{1,12}?(?:路|街|大道|巷|弄|桥|线)")
 STREET_PATTERN = re.compile(r"[\u4e00-\u9fffA-Za-z0-9]{1,12}(?:街道|镇)")
 INTERSECTION_PATTERN = re.compile(
     r"([\u4e00-\u9fffA-Za-z0-9]{1,12}(?:路|街|大道|巷|弄|桥|线))"
@@ -144,9 +144,11 @@ def _clean_road_name(value):
     for marker in ["街道", "镇"]:
         if marker in value:
             value = value.split(marker)[-1]
+    road_suffixes = ("路", "街", "大道", "巷", "弄", "桥", "线")
     for connector in ["和", "与", "及", "、"]:
-        if connector in value:
-            value = value.split(connector)[-1]
+        position = value.rfind(connector)
+        if position > 0 and value[:position].endswith(road_suffixes):
+            value = value[position + len(connector):]
     return value
 
 
