@@ -10,6 +10,11 @@ from ragflow_style_pipeline.sag_entities import normalize_entity_value
 
 
 STAT_ENTITY_TYPES = ["street", "road", "intersection", "poi", "problem_object", "problem_behavior"]
+ALLOWED_FRONTIER_ENTITY_TYPES = {
+    "problem_object", "problem_behavior", "area", "street", "road",
+    "intersection", "poi", "case_type", "time_month", "department", "lnglat",
+}
+
 COVERAGE_ENTITY_TYPES = [
     "area",
     "street",
@@ -41,6 +46,31 @@ def _connect(db_path):
     import duckdb
 
     return duckdb.connect(str(db_path), read_only=False)
+
+
+def _event_filter_sql(filters, event_alias="e", discourse_alias="d"):
+    """Build parameterized event/discourse filters and whether discourse is needed."""
+    filters = filters or {}
+    clauses, params = _month_filter_sql(filters, event_alias)
+    needs_discourse = False
+    satisfaction = filters.get("satisfaction")
+    if satisfaction:
+        clauses.append(f"{discourse_alias}.satisfaction = ?")
+        params.append(str(satisfaction))
+        needs_discourse = True
+    urgency_values = [str(value) for value in (filters.get("urgency_in") or []) if str(value)]
+    if urgency_values:
+        clauses.append(f"{discourse_alias}.urgency in ({', '.join(['?'] * len(urgency_values))})")
+        params.extend(urgency_values)
+        needs_discourse = True
+    intent = filters.get("intent")
+    if intent:
+        clauses.append(
+            f"exists (select 1 from json_each({discourse_alias}.inferred_intents_json) j where trim(cast(j.value as varchar), '\"') = ?)"
+        )
+        params.append(str(intent))
+        needs_discourse = True
+    return clauses, params, needs_discourse
 
 
 def _month_filter_sql(filters, alias="e"):
@@ -98,19 +128,21 @@ def _seed_event_ids(conn, config):
         seed_ids = set.intersection(*group_event_sets) if group_event_sets else set()
 
     filters = config.get("filters") or {}
-    month_clauses, month_params = _month_filter_sql(filters, "e")
-    if month_clauses and seed_ids:
+    filter_clauses, filter_params, needs_discourse = _event_filter_sql(filters, "e", "d")
+    if filter_clauses and seed_ids:
         placeholders = ", ".join(["?"] * len(seed_ids))
+        discourse_join = "join sag_event_discourse d on d.event_id = e.event_id" if needs_discourse else ""
         filtered_ids = {
             row[0]
             for row in conn.execute(
                 f"""
                 select e.event_id
                 from sag_events e
+                {discourse_join}
                 where e.event_id in ({placeholders})
-                  and {" and ".join(month_clauses)}
+                  and {" and ".join(filter_clauses)}
                 """,
-                list(seed_ids) + month_params,
+                list(seed_ids) + filter_params,
             ).fetchall()
         }
         seed_ids = filtered_ids
@@ -159,14 +191,20 @@ def _expanded_events(conn, seed_ids, frontier_rows, config):
     entity_id_to_type_value = {row[0]: (row[1], row[2]) for row in frontier_rows}
     placeholders = ", ".join(["?"] * len(entity_ids))
     max_expanded = int((config.get("expansion") or {}).get("max_expanded_events", 2000))
+    filters = config.get("filters") or {}
+    filter_clauses, filter_params, needs_discourse = _event_filter_sql(filters, "e", "d")
+    discourse_join = "join sag_event_discourse d on d.event_id = e.event_id" if needs_discourse else ""
+    filter_sql = " and " + " and ".join(filter_clauses) if filter_clauses else ""
     rows = conn.execute(
         f"""
         select l.event_id, l.doc_id, l.entity_id, l.confidence
         from sag_event_entity_links l
         join sag_events e on e.event_id = l.event_id
+        {discourse_join}
         where l.entity_id in ({placeholders})
+        {filter_sql}
         """,
-        entity_ids,
+        entity_ids + filter_params,
     ).fetchall()
 
     expanded = {}
@@ -210,6 +248,9 @@ def query_sag_db(db_path, config):
         expansion = config.get("expansion") or {}
         if expansion.get("enabled", False) and int(expansion.get("max_hops", 1)) >= 1:
             frontier_types = expansion.get("frontier_entity_types") or []
+            invalid_types = sorted(set(frontier_types) - ALLOWED_FRONTIER_ENTITY_TYPES)
+            if invalid_types:
+                raise ValueError("invalid_frontier_entity_types:" + ",".join(invalid_types))
             frontier_rows = _frontier_entities(conn, seed_ids, frontier_types)
             expanded = _expanded_events(conn, seed_ids, frontier_rows, config)
             for event_id, info in expanded.items():

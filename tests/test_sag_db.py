@@ -209,6 +209,34 @@ class TestSagDbBuild(unittest.TestCase):
 
         self.assertEqual(rows, [("problem_object", "流动摊贩", "llm")])
 
+    def test_build_db_stores_semantic_event_and_discourse(self):
+        _skip_without_duckdb(self)
+        import duckdb
+
+        order = source_order_row({"id":"9","order_id":"ORD009","case_content":"和平路路灯不亮","service_object_type":"求助"})
+        semantic_event = {
+            "doc_id": order["doc_id"],
+            "event": {"summary": "市民反映和平路路灯不亮"},
+            "validation": {"status": "accepted"},
+        }
+        discourse = {
+            "doc_id": order["doc_id"], "declared_intent":"求助",
+            "inferred_intents_json":"[\"求助\"]", "intent_conflict":"false",
+            "emotions_json":"[]", "satisfaction":"unknown", "urgency":"normal",
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "semantic.duckdb"
+            build_sag_db_from_orders(
+                [order], db_path,
+                semantic_events_by_doc={order["doc_id"]: semantic_event},
+                discourse_by_doc={order["doc_id"]: discourse},
+            )
+            with duckdb.connect(str(db_path)) as conn:
+                event_text = conn.execute("select event_text from sag_events where doc_id = ?", [order["doc_id"]]).fetchone()[0]
+                values = conn.execute("select declared_intent, satisfaction, urgency from sag_event_discourse where doc_id = ?", [order["doc_id"]]).fetchone()
+        self.assertEqual(event_text, "市民反映和平路路灯不亮")
+        self.assertEqual(values, ("求助", "unknown", "normal"))
+
 
 if __name__ == "__main__":
     unittest.main()

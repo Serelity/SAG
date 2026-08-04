@@ -62,10 +62,28 @@ SAG_LINK_COLUMNS = [
     "entity_id",
     "entity_type",
     "entity_value",
+    "surface_form",
+    "normalized_value",
     "source_field",
     "source_channel",
     "confidence",
     "matched_text",
+    "validation_status",
+    "prompt_version",
+]
+
+SAG_DISCOURSE_COLUMNS = [
+    "event_id",
+    "doc_id",
+    "declared_intent",
+    "inferred_intents_json",
+    "intent_conflict",
+    "emotions_json",
+    "satisfaction",
+    "satisfaction_target",
+    "satisfaction_evidence",
+    "urgency",
+    "urgency_evidence",
 ]
 
 
@@ -112,7 +130,7 @@ def source_order_row(row):
         "doc_id": doc_id,
         "raw_id_hash": stable_hash(raw_id),
         "order_id_hash": stable_hash(order_id) if order_id else "",
-        "title_clean": clean_value(row.get("title")),
+        "title_clean": clean_value(row.get("title_clean")) or clean_value(row.get("title")),
         "case_content_clean": clean_value(row.get("case_content_clean")) or clean_value(row.get("case_content")),
         "case_goal_clean": clean_value(row.get("case_goal_clean")) or clean_value(row.get("case_goal")),
         "address_detail_clean": clean_value(row.get("address_detail_clean")) or clean_value(row.get("address_detail")),
@@ -190,7 +208,8 @@ def _source_row_from_multiview(document):
         "doc_id": document.get("doc_id", ""),
         "case_content_clean": document.get("case_content_clean", ""),
         "case_goal_clean": document.get("case_goal_clean", ""),
-        "title": document.get("title_clean", ""),
+        "address_detail_clean": document.get("address_detail_clean", ""),
+        "title_clean": document.get("title_clean", ""),
     }
     metadata = document.get("metadata") or {}
     if isinstance(metadata, dict):
@@ -241,7 +260,7 @@ def _insert_rows(conn, table_name, columns, rows):
 
 
 def load_entity_links_jsonl(path):
-    """Load externally extracted SagEntityLink JSONL rows grouped by doc_id."""
+    """Load legacy or semantic entity-link JSONL rows grouped by doc_id."""
     path = Path(path)
     links_by_doc = {}
     if not path.exists():
@@ -251,28 +270,58 @@ def load_entity_links_jsonl(path):
             if not line.strip():
                 continue
             row = json.loads(line)
-            link = SagEntityLink(
-                doc_id=clean_value(row.get("doc_id")),
-                entity_type=clean_value(row.get("entity_type")),
-                entity_value=clean_value(row.get("entity_value")),
-                normalized_value=clean_value(row.get("normalized_value")) or clean_value(row.get("entity_value")),
-                source_field=clean_value(row.get("source_field")) or "case_content_clean",
-                source_channel=clean_value(row.get("source_channel")) or "llm",
-                confidence=float(row.get("confidence") or 0.0),
-                matched_text=clean_value(row.get("matched_text")) or clean_value(row.get("entity_value")),
-            )
-            if link.doc_id and link.entity_type and link.normalized_value:
-                links_by_doc.setdefault(link.doc_id, []).append(link)
+            doc_id = clean_value(row.get("doc_id"))
+            entity_type = clean_value(row.get("entity_type"))
+            normalized_value = clean_value(row.get("normalized_value")) or clean_value(row.get("entity_value"))
+            if doc_id and entity_type and normalized_value:
+                links_by_doc.setdefault(doc_id, []).append(row)
     return links_by_doc
 
 
-def build_sag_db_from_orders(source_orders, db_path, extra_entity_links_by_doc=None):
-    """Create DuckDB SAG-lite tables from normalized source orders."""
+def load_rows_jsonl_by_doc(path):
+    """Load object JSONL keyed by doc_id without printing source content."""
+    rows = {}
+    path = Path(path)
+    if not path.exists():
+        return rows
+    with path.open("r", encoding="utf-8") as input_file:
+        for line_number, line in enumerate(input_file, 1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict) or not clean_value(row.get("doc_id")):
+                raise ValueError(f"line_{line_number}:missing_doc_id")
+            rows[clean_value(row["doc_id"])] = row
+    return rows
+
+
+def _link_value(link, name, default=""):
+    if isinstance(link, dict):
+        return link.get(name, default)
+    return getattr(link, name, default)
+
+
+def build_sag_db_from_orders(
+    source_orders,
+    db_path,
+    extra_entity_links_by_doc=None,
+    semantic_events_by_doc=None,
+    discourse_by_doc=None,
+):
+    """Create DuckDB SAG tables from normalized orders and optional semantic projections."""
     import duckdb
 
     started_at = time.time()
     source_orders = list(source_orders)
     events = [event_row(order) for order in source_orders]
+    for event in events:
+        override = (semantic_events_by_doc or {}).get(event["doc_id"], {})
+        validation = override.get("validation") if isinstance(override.get("validation"), dict) else {}
+        semantic_event = override.get("event") if isinstance(override.get("event"), dict) else {}
+        status = clean_value(override.get("validation_status")) or clean_value(validation.get("status"))
+        summary = clean_value(override.get("event_text")) or clean_value(semantic_event.get("summary"))
+        if summary and status in {"accepted", "accepted_with_warnings"}:
+            event["event_text"] = summary
     event_by_doc = {event["doc_id"]: event for event in events}
 
     entity_rows_by_key = {}
@@ -280,32 +329,57 @@ def build_sag_db_from_orders(source_orders, db_path, extra_entity_links_by_doc=N
     for order in source_orders:
         rule_links = extract_entities_from_order(order)
         extra_links = (extra_entity_links_by_doc or {}).get(order["doc_id"], [])
-        for link in deduplicate_entity_links(rule_links + extra_links):
-            entity_id = _entity_id(link.entity_type, link.normalized_value)
-            entity_key = (link.entity_type, link.normalized_value)
-            entity_rows_by_key.setdefault(
-                entity_key,
-                {
-                    "entity_id": entity_id,
-                    "entity_type": link.entity_type,
-                    "entity_value": link.entity_value,
-                    "normalized_value": link.normalized_value,
-                },
-            )
-            event = event_by_doc.get(link.doc_id, {})
-            link_rows.append(
-                {
-                    "event_id": event.get("event_id", ""),
-                    "doc_id": link.doc_id,
-                    "entity_id": entity_id,
-                    "entity_type": link.entity_type,
-                    "entity_value": link.entity_value,
-                    "source_field": link.source_field,
-                    "source_channel": link.source_channel,
-                    "confidence": str(link.confidence),
-                    "matched_text": link.matched_text,
-                }
-            )
+        # Rule links remain dataclasses; external semantic links remain dictionaries so
+        # provenance fields and the deliberate absence of model confidence survive.
+        combined = list(deduplicate_entity_links(rule_links)) + list(extra_links)
+        seen_links = set()
+        for link in combined:
+            doc_id = clean_value(_link_value(link, "doc_id")) or order["doc_id"]
+            entity_type = clean_value(_link_value(link, "entity_type"))
+            entity_value = clean_value(_link_value(link, "entity_value"))
+            normalized_value = clean_value(_link_value(link, "normalized_value")) or entity_value
+            source_field = clean_value(_link_value(link, "source_field"))
+            source_channel = clean_value(_link_value(link, "source_channel")) or "llm"
+            matched_text = clean_value(_link_value(link, "matched_text")) or entity_value
+            key = (doc_id, entity_type, normalized_value, source_field, source_channel, matched_text)
+            if not entity_type or not normalized_value or key in seen_links:
+                continue
+            seen_links.add(key)
+            entity_id = _entity_id(entity_type, normalized_value)
+            entity_key = (entity_type, normalized_value)
+            entity_rows_by_key.setdefault(entity_key, {
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "entity_value": entity_value or normalized_value,
+                "normalized_value": normalized_value,
+            })
+            event = event_by_doc.get(doc_id, {})
+            confidence = _link_value(link, "confidence", None)
+            link_rows.append({
+                "event_id": event.get("event_id", ""),
+                "doc_id": doc_id,
+                "entity_id": entity_id,
+                "entity_type": entity_type,
+                "entity_value": entity_value or normalized_value,
+                "surface_form": clean_value(_link_value(link, "surface_form")) or entity_value or normalized_value,
+                "normalized_value": normalized_value,
+                "source_field": source_field,
+                "source_channel": source_channel,
+                "confidence": "" if confidence is None else str(confidence),
+                "matched_text": matched_text,
+                "validation_status": clean_value(_link_value(link, "validation_status")),
+                "prompt_version": clean_value(_link_value(link, "prompt_version")),
+            })
+
+    discourse_rows = []
+    for doc_id, row in (discourse_by_doc or {}).items():
+        if doc_id not in event_by_doc:
+            continue
+        discourse_rows.append({
+            **{column: clean_value(row.get(column)) for column in SAG_DISCOURSE_COLUMNS},
+            "event_id": event_by_doc[doc_id]["event_id"],
+            "doc_id": doc_id,
+        })
 
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -315,11 +389,13 @@ def build_sag_db_from_orders(source_orders, db_path, extra_entity_links_by_doc=N
         _create_table(conn, "sag_events", SAG_EVENT_COLUMNS)
         _create_table(conn, "sag_entities", SAG_ENTITY_COLUMNS)
         _create_table(conn, "sag_event_entity_links", SAG_LINK_COLUMNS)
+        _create_table(conn, "sag_event_discourse", SAG_DISCOURSE_COLUMNS)
 
         _insert_rows(conn, "source_orders", SOURCE_ORDER_COLUMNS, source_orders)
         _insert_rows(conn, "sag_events", SAG_EVENT_COLUMNS, events)
         _insert_rows(conn, "sag_entities", SAG_ENTITY_COLUMNS, list(entity_rows_by_key.values()))
         _insert_rows(conn, "sag_event_entity_links", SAG_LINK_COLUMNS, link_rows)
+        _insert_rows(conn, "sag_event_discourse", SAG_DISCOURSE_COLUMNS, discourse_rows)
 
         conn.execute("create index if not exists idx_source_orders_doc_id on source_orders(doc_id)")
         conn.execute("create index if not exists idx_sag_events_event_id on sag_events(event_id)")
@@ -330,6 +406,10 @@ def build_sag_db_from_orders(source_orders, db_path, extra_entity_links_by_doc=N
         conn.execute("create index if not exists idx_sag_links_event_id on sag_event_entity_links(event_id)")
         conn.execute("create index if not exists idx_sag_links_entity_id on sag_event_entity_links(entity_id)")
         conn.execute("create index if not exists idx_sag_links_entity_type on sag_event_entity_links(entity_type)")
+        conn.execute("create index if not exists idx_sag_discourse_doc_id on sag_event_discourse(doc_id)")
+        conn.execute("create index if not exists idx_sag_discourse_event_id on sag_event_discourse(event_id)")
+        conn.execute("create index if not exists idx_sag_discourse_satisfaction on sag_event_discourse(satisfaction)")
+        conn.execute("create index if not exists idx_sag_discourse_urgency on sag_event_discourse(urgency)")
 
     return {
         "db_path": str(db_path),
@@ -337,15 +417,24 @@ def build_sag_db_from_orders(source_orders, db_path, extra_entity_links_by_doc=N
         "events_loaded": len(events),
         "entities_loaded": len(entity_rows_by_key),
         "links_loaded": len(link_rows),
+        "discourse_loaded": len(discourse_rows),
         "build_seconds": round(time.time() - started_at, 3),
     }
 
 
-def build_sag_db(input_path, db_path, limit=None, entity_links_jsonl=""):
-    """Read source rows and create a pure SAG-lite DuckDB database."""
+def build_sag_db(
+    input_path, db_path, limit=None, entity_links_jsonl="",
+    semantic_events_jsonl="", discourse_jsonl="",
+):
+    """Read source rows and build SAG tables without importing model code."""
     rows = read_source_rows(input_path, limit=limit)
     extra_links = load_entity_links_jsonl(entity_links_jsonl) if entity_links_jsonl else None
-    report = build_sag_db_from_orders(rows, db_path, extra_entity_links_by_doc=extra_links)
+    semantic_events = load_rows_jsonl_by_doc(semantic_events_jsonl) if semantic_events_jsonl else None
+    discourse = load_rows_jsonl_by_doc(discourse_jsonl) if discourse_jsonl else None
+    report = build_sag_db_from_orders(
+        rows, db_path, extra_entity_links_by_doc=extra_links,
+        semantic_events_by_doc=semantic_events, discourse_by_doc=discourse,
+    )
     report["input_path"] = str(input_path)
     if entity_links_jsonl:
         report["entity_links_jsonl"] = str(entity_links_jsonl)
@@ -357,13 +446,18 @@ def parse_args(argv=None):
     parser.add_argument("--input", required=True, help="Input t_order_master.tsv or multiview JSONL.")
     parser.add_argument("--db", required=True, help="Output DuckDB database path.")
     parser.add_argument("--limit", type=int, default=None, help="Optional row limit.")
-    parser.add_argument("--entity-links-jsonl", default="", help="Optional LLM SagEntityLink JSONL to merge into the SAG database.")
+    parser.add_argument("--entity-links-jsonl", default="", help="Optional legacy or semantic entity-link JSONL.")
+    parser.add_argument("--semantic-events-jsonl", default="", help="Optional projected semantic event JSONL.")
+    parser.add_argument("--discourse-jsonl", default="", help="Optional projected event discourse JSONL.")
     return parser.parse_args(argv)
 
 
 def main(argv=None):
     args = parse_args(argv)
-    report = build_sag_db(args.input, args.db, args.limit, args.entity_links_jsonl)
+    report = build_sag_db(
+        args.input, args.db, args.limit, args.entity_links_jsonl,
+        args.semantic_events_jsonl, args.discourse_jsonl,
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

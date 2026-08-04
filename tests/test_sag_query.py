@@ -94,6 +94,38 @@ class TestSagQuery(unittest.TestCase):
         stages = {result["match_stage"] for result in results}
         self.assertIn("one_hop_expansion", stages)
 
+    def test_query_filters_seed_events_by_discourse(self):
+        _skip_without_duckdb(self)
+        orders = [
+            source_order_row({"id":"11","order_id":"D11","case_content":"和平路路灯不亮","address_detail":"和平路"}),
+            source_order_row({"id":"12","order_id":"D12","case_content":"和平路道路咨询","address_detail":"和平路"}),
+        ]
+        discourse = {
+            orders[0]["doc_id"]: {"doc_id":orders[0]["doc_id"],"inferred_intents_json":"[\"投诉\"]","satisfaction":"dissatisfied","urgency":"high"},
+            orders[1]["doc_id"]: {"doc_id":orders[1]["doc_id"],"inferred_intents_json":"[\"咨询\"]","satisfaction":"satisfied","urgency":"normal"},
+        }
+        config = {
+            "seed_entities":[{"entity_type":"road","values":["和平路"]}],
+            "filters":{"intent":"投诉","satisfaction":"dissatisfied","urgency_in":["high","critical"]},
+            "expansion":{"enabled":False},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "discourse.duckdb"
+            build_sag_db_from_orders(orders, db_path, discourse_by_doc=discourse)
+            results = query_sag_db(db_path, config)
+        self.assertEqual([row["doc_id"] for row in results], [orders[0]["doc_id"]])
+
+    def test_discourse_cannot_be_used_as_frontier(self):
+        _skip_without_duckdb(self)
+        config = {
+            "seed_entities":[{"entity_type":"road","values":["广成路"]}],
+            "expansion":{"enabled":True,"frontier_entity_types":["satisfaction"]},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = _build_test_db(tmpdir)
+            with self.assertRaisesRegex(ValueError, "invalid_frontier_entity_types:satisfaction"):
+                query_sag_db(db_path, config)
+
 
 class TestSagReport(unittest.TestCase):
     def test_analyze_sag_query_reports_statistics_and_metadata_recovery(self):
