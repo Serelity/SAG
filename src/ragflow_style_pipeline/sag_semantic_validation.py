@@ -71,11 +71,11 @@ def sanitize_semantic_output(semantic, warnings):
     reset_urgency = False
     sanitation_warnings = []
     align_surfaces = {}
+    align_canonicals = {}
     entity_drop_codes = {
         "invalid_source_field", "missing_evidence", "empty_canonical",
         "generic_entity", "duplicate_entity", "road_poi_conflict",
         "intersection_shape_conflict", "request_action_as_behavior",
-        "canonical_evidence_conflict",
     }
 
     for warning in warnings or []:
@@ -95,6 +95,11 @@ def sanitize_semantic_output(semantic, warnings):
         elif code == "surface_evidence_mismatch" and len(parts) == 3 and parts[0] == "entities":
             try:
                 align_surfaces.setdefault(parts[1], set()).add(int(parts[2]))
+            except ValueError:
+                pass
+        elif code == "canonical_evidence_conflict" and len(parts) == 3 and parts[0] == "entities":
+            try:
+                align_canonicals.setdefault(parts[1], set()).add(int(parts[2]))
             except ValueError:
                 pass
         elif code == "missing_evidence" and len(parts) == 3 and parts[0] == "discourse":
@@ -120,6 +125,19 @@ def sanitize_semantic_output(semantic, warnings):
             if evidence:
                 items[index]["surface"] = evidence
                 _add(sanitation_warnings, f"aligned_surface_to_evidence:entities.{group}.{index}")
+
+    for group, indexes in align_canonicals.items():
+        items = entities.get(group)
+        dropped = drop_entities.get(group, set())
+        if not isinstance(items, list):
+            continue
+        for index in sorted(indexes):
+            if index in dropped or not (0 <= index < len(items)) or not isinstance(items[index], dict):
+                continue
+            surface = _text(items[index].get("surface")) or _text(items[index].get("evidence"))
+            if surface:
+                items[index]["canonical"] = surface
+                _add(sanitation_warnings, f"aligned_canonical_to_surface:entities.{group}.{index}")
 
     for group, indexes in drop_entities.items():
         items = entities.get(group)

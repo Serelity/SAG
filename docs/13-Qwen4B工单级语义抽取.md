@@ -50,7 +50,7 @@ python scripts/check_semantic_run.py \
   --quality-report outputs/work_order_semantics.quality.json
 ```
 
-检查：无 OOM；processed 数量正确；每工单一次 primary；repair 不超过 repair-required 数量；`finish_reason=length` 可解释；报告中不含 prompt、正文、evidence 或原始响应。当前 `sag_semantic_v4` 的 primary 上限为 640 tokens，只有整单 repair 使用 768 tokens，避免修复响应再次在 512 tokens 被截断。
+检查：无 OOM；processed 数量正确；每工单一次 primary；repair 不超过 repair-required 数量；`finish_reason=length` 可解释；报告中不含 prompt、正文、evidence 或原始响应。当前 `sag_semantic_v5` 的 primary 上限为 640 tokens，只有整单 repair 使用 768 tokens，避免修复响应再次在 512 tokens 被截断。v5 会对候选级 sanitation 做最多三轮确定性复核，直到稳定；JSON 失败和历史污染不会被确定性改写。
 
 每次运行默认同时生成隐私安全诊断日志：
 
@@ -82,7 +82,13 @@ LIMIT=995 bash scripts/build_sag_semantic_100k.sh
 
 ## 6. 100k 与恢复
 
-smoke 正确性和显存通过后，分别使用全新输出目录测试 `BATCH_SIZE=2`、`BATCH_SIZE=4`；不要复用旧 checkpoint。995 样本质量通过后运行：
+batch 1 仅用于早期调试，不满足生产吞吐。smoke 正确性和显存通过后，使用全新输出目录先测 `BATCH_SIZE=8`；若 GPU 峰值低于约 28GB 且无 OOM，再比较 4/8/16：
+
+```bash
+LIMIT=32 BATCH_SIZES="4 8 16" bash scripts/benchmark_semantic_batches.sh
+```
+
+脚本为每个 batch size 启动独立进程，避免前一轮 CUDA cache 干扰后一轮；比较 `orders_per_second`、`output_tokens_per_second`、reject/repair 和 GPU 峰值，以质量不下降条件下吞吐最高者作为 995 配置。Transformers 路径使用 SDPA 和 KV cache，批次间默认不调用 `empty_cache()`，以复用 allocator；应依据 current allocated 判断真实张量是否增长，reserved 增长本身不等于泄漏。若 batch 16 后仍无法满足 100k 时限，再增加 vLLM continuous batching/prefix caching backend，而不是牺牲 schema、evidence 验证或工单级一次主请求约束。不要复用旧 checkpoint。995 样本质量通过后运行：
 
 ```bash
 LIMIT=100000 bash scripts/extract_semantics_qwen3_4b.sh
@@ -124,7 +130,7 @@ outputs/sag_semantic.qwen3_4b.100k.duckdb
 
 ## 8. 服务器性能记录
 
-保留但不要提交：GPU 型号、dtype、batch size、input/output token 总量及 p50/p95、finish reason、repair/reject/OOM、elapsed seconds、orders/s、tokens/s、GPU 利用率和峰值显存。长短文本按配置分桶；若 Transformers 吞吐不足，可在 schema 稳定后增加 vLLM backend，不改变工单级 schema 和投影。
+保留但不要提交：GPU 型号、dtype、batch size、attention/cache implementation、input/output token 总量及 p50/p95、finish reason、repair/reject/OOM、elapsed seconds、orders/s、output tokens/s、GPU 利用率和 current/peak allocated/reserved。长短文本按配置分桶；短 smoke 的 orders/s 包含模型加载开销，batch benchmark 应至少运行 32 条。若 Transformers batch 16 吞吐仍不足，可增加 vLLM backend，不改变工单级 schema 和投影。
 
 ## 9. 故障恢复
 

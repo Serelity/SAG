@@ -52,6 +52,19 @@ def _write_jsonl(path, rows):
         os.fsync(output.fileno())
 
 
+def _append_jsonl(path, rows):
+    rows = list(rows)
+    if not rows:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as output:
+        for row in rows:
+            output.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
 def _read_jsonl(path):
     path = Path(path)
     if not path.exists():
@@ -131,7 +144,7 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         },
         "model_run": {
             "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
-            "prompt_version": str(config.get("prompt_version", "sag_semantic_v4")),
+            "prompt_version": str(config.get("prompt_version", "sag_semantic_v5")),
             "backend": str(config.get("backend", "transformers")),
             "input_tokens": generation["input_tokens"],
             "output_tokens": generation["output_tokens"],
@@ -154,17 +167,34 @@ def _validate_with_sanitation(order, semantic, parse_warnings):
     if "json_parse_failed" in validation["warnings"] or "possible_history_contamination" in validation["warnings"]:
         trace["validation_after"] = validation
         return semantic, validation, trace
-    cleaned, sanitation_warnings = sanitize_semantic_output(semantic, validation["warnings"])
+
+    cleaned = semantic
+    cleaned_validation = validation
+    sanitation_warnings = []
+    for _pass in range(3):
+        next_cleaned, actions = sanitize_semantic_output(cleaned, cleaned_validation["warnings"])
+        for action in actions:
+            if action not in sanitation_warnings:
+                sanitation_warnings.append(action)
+        if not actions or next_cleaned == cleaned:
+            break
+        cleaned = next_cleaned
+        cleaned_validation = validate_semantic_output(order, cleaned, parse_warnings)
+        if cleaned_validation["status"] in {"accepted", "accepted_with_warnings"}:
+            break
+        if "json_parse_failed" in cleaned_validation["warnings"] or "possible_history_contamination" in cleaned_validation["warnings"]:
+            break
+
     trace["sanitation_warnings"] = sanitation_warnings
-    if not sanitation_warnings:
-        trace["validation_after"] = validation
-        return semantic, validation, trace
-    cleaned_validation = validate_semantic_output(order, cleaned, parse_warnings)
-    if cleaned_validation["status"] in {"accepted", "accepted_with_warnings"}:
+    if cleaned_validation["status"] in {"accepted", "accepted_with_warnings"} and sanitation_warnings:
+        final_warnings = list(sanitation_warnings)
+        for warning in cleaned_validation["warnings"]:
+            if warning not in final_warnings:
+                final_warnings.append(warning)
         cleaned_validation = {
             **cleaned_validation,
             "status": "accepted_with_warnings",
-            "warnings": sanitation_warnings + cleaned_validation["warnings"],
+            "warnings": final_warnings,
         }
     trace["validation_after"] = cleaned_validation
     return cleaned, cleaned_validation, trace
@@ -239,8 +269,10 @@ def _run_generator_with_diagnostics(
         raise
 
 
-def load_transformers_generator(model_path, enable_thinking=False):
-    """Load the server-local Qwen backend.  Heavy imports stay inside this function."""
+def load_transformers_generator(
+    model_path, enable_thinking=False, attn_implementation="sdpa", cache_implementation="dynamic",
+):
+    """Load the server-local Qwen backend. Heavy imports stay inside this function."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -257,13 +289,16 @@ def load_transformers_generator(model_path, enable_thinking=False):
         "bfloat16": torch.bfloat16,
         "float16": torch.float16,
     }.get(dtype_name, torch.float16 if torch.cuda.is_available() else torch.float32)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=dtype,
-        device_map="auto",
-        local_files_only=True,
-        trust_remote_code=True,
-    )
+    model_kwargs = {
+        "torch_dtype": dtype,
+        "device_map": "auto",
+        "local_files_only": True,
+        "trust_remote_code": True,
+    }
+    if attn_implementation:
+        model_kwargs["attn_implementation"] = str(attn_implementation)
+    model = AutoModelForCausalLM.from_pretrained(model_path, **model_kwargs)
+    model.eval()
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
 
@@ -284,7 +319,10 @@ def load_transformers_generator(model_path, enable_thinking=False):
             "max_new_tokens": int(max_new_tokens),
             "do_sample": float(temperature) > 0,
             "pad_token_id": tokenizer.pad_token_id or tokenizer.eos_token_id,
+            "use_cache": True,
         }
+        if cache_implementation and str(cache_implementation).lower() != "dynamic":
+            kwargs["cache_implementation"] = str(cache_implementation)
         if kwargs["do_sample"]:
             kwargs["temperature"] = float(temperature)
         with torch.inference_mode():
@@ -328,6 +366,8 @@ def load_transformers_generator(model_path, enable_thinking=False):
 
     generate.empty_cache = empty_cache
     generate.memory_stats = memory_stats
+    generate.attn_implementation = str(attn_implementation or "default")
+    generate.cache_implementation = str(cache_implementation or "dynamic")
     return generate
 
 
@@ -367,7 +407,7 @@ def run_semantic_extraction(
     started_at = _utc_now()
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
-    prompt_version = str(config.get("prompt_version", "sag_semantic_v4"))
+    prompt_version = str(config.get("prompt_version", "sag_semantic_v5"))
     output_path = Path(output_path)
     rejects_path = Path(rejects_path)
     partial_path = Path(str(output_path) + ".partial.jsonl")
@@ -403,11 +443,19 @@ def run_semantic_extraction(
     ]
     records = list(existing)
     rejects = []
+    batch_size = max(1, int(config.get("batch_size", 8)))
+    checkpoint_every = max(1, int(config.get("checkpoint_every", 50)))
+    if resume and output_path.exists():
+        _write_jsonl(partial_path, existing)
+    elif not resume:
+        _write_jsonl(partial_path, [])
+    elif not partial_path.exists():
+        _write_jsonl(partial_path, existing)
+    persisted_record_count = len(records)
+    processed_since_checkpoint = 0
     primary_requests = 0
     repair_requests = 0
     generation_rows = []
-    batch_size = max(1, int(config.get("batch_size", 8)))
-    checkpoint_every = max(1, int(config.get("checkpoint_every", 50)))
     ordered_pending = _bucket_orders(pending, config.get("length_bucket_boundaries", [600, 1400]))
     _append_diagnostic(diagnostic_path, {
         "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
@@ -419,7 +467,10 @@ def run_semantic_extraction(
     if generator is None:
         try:
             generator = load_transformers_generator(
-                model_path, enable_thinking=bool(config.get("enable_thinking", False))
+                model_path,
+                enable_thinking=bool(config.get("enable_thinking", False)),
+                attn_implementation=str(config.get("attn_implementation", "sdpa")),
+                cache_implementation=str(config.get("cache_implementation", "dynamic")),
             )
         except Exception as error:
             _append_diagnostic(diagnostic_path, {
@@ -430,7 +481,10 @@ def run_semantic_extraction(
     backend_memory_reader = getattr(generator, "memory_stats", None)
     backend_memory = backend_memory_reader() if callable(backend_memory_reader) else {}
     _append_diagnostic(diagnostic_path, {
-        "event": "backend_ready", "ts": _utc_now(), **backend_memory,
+        "event": "backend_ready", "ts": _utc_now(),
+        "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
+        "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
+        **backend_memory,
     })
 
     for batch_start in range(0, len(ordered_pending), batch_size):
@@ -510,14 +564,17 @@ def run_semantic_extraction(
                 "batch_start": batch_start, **memory_reader(),
             })
 
-        if len(records) % checkpoint_every == 0 or batch_start + batch_size >= len(ordered_pending):
-            _write_jsonl(partial_path, records)
+        processed_since_checkpoint += len(batch)
+        if processed_since_checkpoint >= checkpoint_every or batch_start + batch_size >= len(ordered_pending):
+            _append_jsonl(partial_path, records[persisted_record_count:])
+            persisted_record_count = len(records)
+            processed_since_checkpoint = 0
             _atomic_json(checkpoint_path, {
                 "completed": len(records), "rejects": len(rejects),
                 "prompt_version": prompt_version, "model": model_id, "updated_at": _utc_now(),
             })
 
-    _write_jsonl(partial_path, records)
+    _append_jsonl(partial_path, records[persisted_record_count:])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     os.replace(partial_path, output_path)
     _write_jsonl(rejects_path, rejects)
@@ -534,6 +591,9 @@ def run_semantic_extraction(
         "model": model_id,
         "backend": str(config.get("backend", "transformers")),
         "dtype": os.environ.get("SEMANTIC_LLM_DTYPE", "auto"),
+        "batch_size": batch_size,
+        "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
+        "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
         "config_hash": _config_hash(config),
         "orders_input": len(orders),
         "orders_processed": len(pending),
@@ -551,6 +611,10 @@ def run_semantic_extraction(
         "truncation_count": finish_reasons.get("length", 0),
         "elapsed_seconds": round(elapsed, 3),
         "orders_per_second": round(len(pending) / elapsed, 4) if elapsed else 0.0,
+        "model_latency_seconds": round(sum(row["latency_ms"] for row in generation_rows) / 1000, 3),
+        "output_tokens_per_second": round(
+            sum(output_tokens) / (sum(row["latency_ms"] for row in generation_rows) / 1000), 3
+        ) if generation_rows and sum(row["latency_ms"] for row in generation_rows) else 0.0,
         "started_at": started_at,
         "ended_at": _utc_now(),
         "checkpoint": str(checkpoint_path),

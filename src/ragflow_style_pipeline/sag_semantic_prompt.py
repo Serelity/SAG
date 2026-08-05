@@ -288,9 +288,9 @@ _FEW_SHOTS = """六个跨领域边界示例：
 _COMPACT_RULES = """你是面向 SAG 检索的 12345 工单语义结构化器，对任意领域做开放式识别。只输出紧凑单行 JSON。
 输入字段：title_clean、case_content_clean、case_goal_clean、address_detail_clean。input_window_info 和 metadata_context 仅作背景，绝不能作为 field/evidence，且不能覆盖正文当前事实。
 event_summary：完整概括当前事件和诉求，不编造；历史答复不得覆盖“不认可、仍未解决、再次要求”等当前立场。
-实体：problem_objects 是具体领域对象；problem_behaviors 是问题现象/异常状态，维修、清理、修剪、拆除、处理等纯诉求动作不得作为 behavior。road 仅具体命名道路；intersection 须明确路口/道路组合；poi 是小区、学校、医院、市场、机构等。港龙新港城北门口是 poi，不是 road。泛词不抽取，canonical 保守。
+实体：problem_objects 是具体领域对象；只要正文明确描述对象正在发生的问题现象/异常状态，就提取 problem_behaviors，不能只提对象而漏掉行为；维修、清理、修剪、拆除、处理等纯诉求动作不得作为 behavior。road 仅具体命名道路；intersection 须明确路口/道路组合；poi 是小区、学校、医院、市场、机构等。港龙新港城北门口是 poi，不是 road。泛词不抽取，canonical 保守。
 每个实体严格为 {surface, canonical, field, evidence}；field 只能是 title_clean、case_content_clean、case_goal_clean、address_detail_clean；evidence 必须是该字段中的连续原文，surface 也必须忠实来自 evidence。
-Discourse：intents 必须是最多3个 {label,evidence} 对象，例 [{"label":"投诉","evidence":"要求调查处理"}]，label 只能取投诉/举报/求助/咨询/建议/表扬/催办/反馈/其他；emotions 必须是最多2个 {label,intensity,evidence} 对象，例 [{"label":"不满","intensity":2,"evidence":"其不认可"}]，label 只能取愤怒/不满/焦虑/无奈/悲伤/感谢/认可，intensity=1/2/3。禁止输出字符串数组、英文标签或“投诉举报”等组合标签；无直接连续原文 evidence 则空数组。对象态度恶劣不等于诉求人愤怒。satisfaction 取 satisfied/dissatisfied/mixed/unknown，非 unknown 必须有 target 和直接 evidence；模板“谢谢/感谢转交/请优先处理”不能判定满意。urgency 取 normal/high/critical；“优先处理”不能单独升高，critical 仅当前人身/火灾/燃气/坍塌等紧迫风险。
+Discourse：intents 必须是最多3个 {label,evidence} 对象，例 [{"label":"投诉","evidence":"要求调查处理"}]，label 只能取投诉/举报/求助/咨询/建议/表扬/催办/反馈/其他；emotions 必须是最多2个 {label,intensity,evidence} 对象，例 [{"label":"不满","intensity":2,"evidence":"其不认可"}]，label 只能取愤怒/不满/焦虑/无奈/悲伤/感谢/认可，intensity=1/2/3。禁止输出字符串数组、英文标签或“投诉举报”等组合标签；每个 discourse evidence 必须逐字复制某个 clean field 中的一段连续原文，不能改写、拼接或概括，找不到直接原文就删除该项。对象态度恶劣不等于诉求人愤怒。satisfaction 取 satisfied/dissatisfied/mixed/unknown，非 unknown 必须有 target 和直接 evidence；模板“谢谢/感谢转交/请优先处理”不能判定满意。urgency 取 normal/high/critical；“优先处理”不能单独升高，critical 仅当前人身/火灾/燃气/坍塌等紧迫风险。
 上限：objects3、behaviors4、roads4、intersections2、pois4；没有可靠证据就输出空数组。不要输出 confidence、Markdown、解释或思维链。"""
 
 _COMPACT_FEW_SHOTS = """示例 1：输入“和平路路灯连续三天不亮，希望维修”→object=路灯；behavior=照明故障，surface/evidence=连续三天不亮；road=和平路；维修是诉求动作。
@@ -304,8 +304,8 @@ _COMPACT_FEW_SHOTS = """示例 1：输入“和平路路灯连续三天不亮，
 def build_semantic_prompt(order, config):
     """Build the primary extraction prompt from one normalized work order."""
     payload = _semantic_payload(order, config, include_metadata=True)
-    skeleton = json.dumps(FINAL_JSON_SKELETON, ensure_ascii=False, indent=2)
-    payload_json = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    skeleton = json.dumps(FINAL_JSON_SKELETON, ensure_ascii=False, separators=(",", ":"))
+    payload_json = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return (
         _COMPACT_RULES
         + "\n"
@@ -321,11 +321,11 @@ def build_semantic_prompt(order, config):
 def build_repair_prompt(order, original_output, errors, config):
     """Build a constrained one-shot repair prompt without raw metadata fields."""
     clean_payload = _semantic_payload(order, config, include_metadata=False)
-    clean_json = json.dumps(clean_payload, ensure_ascii=False, indent=2, sort_keys=True)
+    clean_json = json.dumps(clean_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     error_codes = [error for error in errors if isinstance(error, str)] if isinstance(errors, list) else []
-    errors_json = json.dumps(error_codes, ensure_ascii=False, indent=2)
+    errors_json = json.dumps(error_codes, ensure_ascii=False, separators=(",", ":"))
     original_output = _text(original_output)
-    skeleton = json.dumps(FINAL_JSON_SKELETON, ensure_ascii=False, indent=2)
+    skeleton = json.dumps(FINAL_JSON_SKELETON, ensure_ascii=False, separators=(",", ":"))
     return f"""你是 JSON 结果修复器。下面仅提供修复所需的脱敏 clean fields、原始模型输出和验证器机器错误码。
 只修复错误码指向的字段；其他正确字段保持原意不变。不得新增原文没有的事实，所有 evidence 必须是相应 clean field 的连续原文，实体项使用 {{surface, canonical, field, evidence}}。
 输出必须符合给定 JSON 骨架，不要添加运行元数据。请在内部检查，但不要输出分析过程、推理步骤或思维链。

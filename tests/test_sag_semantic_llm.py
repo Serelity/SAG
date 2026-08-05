@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from ragflow_style_pipeline.sag_semantic_llm import parse_args, run_semantic_extraction
+from ragflow_style_pipeline.sag_semantic_llm import _validate_with_sanitation, parse_args, run_semantic_extraction
 
 
 class RecordingGenerator:
@@ -49,7 +49,7 @@ class TestSemanticLlm(unittest.TestCase):
             generator = RecordingGenerator()
             summary = run_semantic_extraction(
                 source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":8,"max_new_tokens":640,"repair_max_new_tokens":768,"temperature":0.0,"max_repairs_per_order":1,"checkpoint_every":1},
+                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":8,"max_new_tokens":640,"repair_max_new_tokens":768,"temperature":0.0,"max_repairs_per_order":1,"checkpoint_every":1},
                 generator=generator,
             )
             record = json.loads((tmp/"semantic.jsonl").read_text(encoding="utf-8"))
@@ -80,7 +80,7 @@ class TestSemanticLlm(unittest.TestCase):
             diagnostic = tmp/"diagnostics.jsonl"
             summary = run_semantic_extraction(
                 source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":1,"checkpoint_every":1},
+                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":1,"checkpoint_every":1},
                 generator=generator, diagnostic_path=diagnostic,
             )
             record = json.loads((tmp/"semantic.jsonl").read_text(encoding="utf-8"))
@@ -116,7 +116,7 @@ class TestSemanticLlm(unittest.TestCase):
             with self.assertRaises((ValueError, json.JSONDecodeError)):
                 run_semantic_extraction(
                     source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":1},
+                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":1},
                     generator=RecordingGenerator(False), diagnostic_path=diagnostic,
                 )
             diagnostics = [json.loads(line) for line in diagnostic.read_text(encoding="utf-8").splitlines()]
@@ -138,7 +138,7 @@ class TestSemanticLlm(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 run_semantic_extraction(
                     source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":1},
+                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":1},
                     generator=FailingGenerator(), diagnostic_path=diagnostic,
                 )
             diagnostics = [json.loads(line) for line in diagnostic.read_text(encoding="utf-8").splitlines()]
@@ -147,11 +147,62 @@ class TestSemanticLlm(unittest.TestCase):
         self.assertNotIn("message", failure)
         self.assertNotIn("港龙新港城", json.dumps(diagnostics, ensure_ascii=False))
 
+    def test_fixed_point_sanitation_resolves_new_canonical_conflict_without_repair(self):
+        order = {
+            "doc_id":"order_2", "title_clean":"", "case_content_clean":"路灯连续三天不亮。",
+            "case_goal_clean":"", "address_detail_clean":"",
+        }
+        semantic = {
+            "event_summary":"路灯连续三天不亮",
+            "entities":{
+                "problem_objects":[],
+                "problem_behaviors":[{
+                    "surface":"照明故障", "canonical":"照明故障",
+                    "source_field":"case_content_clean", "evidence":"连续三天不亮",
+                }],
+                "roads":[], "intersections":[], "pois":[],
+            },
+            "discourse":{
+                "intents":[], "emotions":[],
+                "satisfaction":{"label":"unknown", "target":"", "evidence":""},
+                "urgency":{"level":"normal", "evidence":""},
+            },
+        }
+        cleaned, validation, trace = _validate_with_sanitation(order, semantic, [])
+        candidate = cleaned["entities"]["problem_behaviors"][0]
+        self.assertEqual(validation["status"], "accepted_with_warnings")
+        self.assertEqual(candidate["surface"], "连续三天不亮")
+        self.assertEqual(candidate["canonical"], "连续三天不亮")
+        self.assertEqual(trace["sanitation_warnings"], [
+            "aligned_surface_to_evidence:entities.problem_behaviors.0",
+            "aligned_canonical_to_surface:entities.problem_behaviors.0",
+        ])
+
+    def test_incremental_checkpoint_preserves_all_batched_records(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir); source = tmp/"orders.jsonl"
+            source.write_text("".join(
+                json.dumps({"doc_id":f"order_{index}", "case_content_clean":"港龙新港城北门口有摊贩占道。"}, ensure_ascii=False) + "\n"
+                for index in range(5)
+            ), encoding="utf-8")
+            generator = RecordingGenerator(False)
+            report = run_semantic_extraction(
+                source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
+                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":2,"checkpoint_every":3},
+                generator=generator,
+            )
+            rows = [json.loads(line) for line in (tmp/"semantic.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(generator.calls), 3)
+        self.assertEqual(len(rows), 5)
+        self.assertEqual(len({row["doc_id"] for row in rows}), 5)
+        self.assertEqual(report["batch_size"], 2)
+        self.assertGreater(report["output_tokens_per_second"], 0)
+
     def test_valid_primary_uses_one_request_and_resume_skips_identity(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)
             paths = [tmp/name for name in ("semantic.jsonl","rejects.jsonl","run.json","quality.json")]
-            config = {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":8,"checkpoint_every":1}
+            config = {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":8,"checkpoint_every":1}
             first = RecordingGenerator(False)
             run_semantic_extraction(source, *paths, "unused", config, generator=first)
             second = RecordingGenerator(False)

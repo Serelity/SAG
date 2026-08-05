@@ -113,7 +113,7 @@ class TestSemanticPrompt(unittest.TestCase):
 
     def test_prompt_has_exact_final_skeleton_and_entity_item_field(self):
         prompt = build_semantic_prompt({"case_content_clean": "正文"}, {})
-        skeleton = json.dumps(FINAL_JSON_SKELETON, ensure_ascii=False, indent=2)
+        skeleton = json.dumps(FINAL_JSON_SKELETON, ensure_ascii=False, separators=(",", ":"))
         self.assertIn(skeleton, prompt)
         self.assertEqual(FINAL_JSON_SKELETON, {
             "event_summary": "",
@@ -162,7 +162,7 @@ class TestSemanticPrompt(unittest.TestCase):
         for marker in ("现再次反映", "仍未解决"):
             self.assertIn(marker, CURRENT_MARKERS)
             self.assertIn(marker, prompt)
-        self.assertIn('"truncated": true', prompt)
+        self.assertIn('"truncated":true', prompt)
 
     def test_primary_prompt_only_includes_allowlisted_metadata_context(self):
         prompt = build_semantic_prompt({
@@ -215,10 +215,12 @@ class TestSemanticPrompt(unittest.TestCase):
         config = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(config, {
             "schema_version": "2.0",
-            "prompt_version": "sag_semantic_v4",
+            "prompt_version": "sag_semantic_v5",
             "model_id": "Qwen/Qwen3-4B",
             "model_path": "models/Qwen3-4B",
             "backend": "transformers",
+            "attn_implementation": "sdpa",
+            "cache_implementation": "dynamic",
             "enable_thinking": False,
             "max_input_chars": 2200,
             "max_new_tokens": 640,
@@ -229,7 +231,7 @@ class TestSemanticPrompt(unittest.TestCase):
             "checkpoint_every": 50,
             "max_repairs_per_order": 1,
             "length_bucket_boundaries": [600, 1400],
-            "empty_cache_between_batches": True,
+            "empty_cache_between_batches": False,
             "default_output": "outputs/work_order_semantics.qwen3_4b.jsonl",
             "default_rejects": "outputs/work_order_semantics.rejects.jsonl",
         })
