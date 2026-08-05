@@ -1,14 +1,18 @@
 """Deterministic quality gates for normalized work-order semantics."""
 
+from copy import deepcopy
+
 from ragflow_style_pipeline.sag_semantic_schema import ENTITY_GROUPS, GROUP_LIMITS, SOURCE_FIELDS
 
 STATUSES = {"accepted", "accepted_with_warnings", "repair_required", "rejected"}
 REPAIR_PREFIXES = (
-    "json_parse_failed", "missing_evidence:", "invalid_source_field:",
-    "road_poi_conflict:", "intersection_shape_conflict:",
+    "json_parse_failed", "empty_event_summary", "missing_evidence:", "invalid_source_field:",
+    "surface_evidence_mismatch:", "empty_canonical:", "generic_entity:",
+    "duplicate_entity:", "road_poi_conflict:", "intersection_shape_conflict:",
     "request_action_as_behavior:", "canonical_evidence_conflict:",
     "satisfaction_missing_target_or_evidence", "template_politeness_as_satisfaction",
-    "possible_history_contamination", "group_limit_exceeded:",
+    "urgency_missing_evidence", "template_priority_as_urgency",
+    "possible_history_contamination",
 )
 REJECT_PREFIXES = ("missing_doc_id", "empty_semantic_text", "repair_failed")
 _GENERIC = {"问题", "情况", "事情", "相关部门", "工作人员", "道路", "马路边", "小区", "地点"}
@@ -42,13 +46,89 @@ def _repair_field(warning):
         return "discourse.satisfaction"
     if "urgency" in warning:
         return "discourse.urgency"
-    if warning == "possible_history_contamination":
+    if warning in {"empty_event_summary", "possible_history_contamination"}:
         return "event_summary"
     return ""
 
 
 def _contains(source, evidence):
     return bool(evidence and evidence in source)
+
+
+def sanitize_semantic_output(semantic, warnings):
+    """Conservatively remove invalid optional candidates without losing an event.
+
+    A bad optional entity or discourse attribute should not reject an otherwise
+    useful work order.  Parse failures and history contamination are not
+    sanitized because they require a model repair or rejection.
+    """
+    cleaned = deepcopy(semantic if isinstance(semantic, dict) else {})
+    entities = cleaned.get("entities") if isinstance(cleaned.get("entities"), dict) else {}
+    discourse = cleaned.get("discourse") if isinstance(cleaned.get("discourse"), dict) else {}
+    drop_entities = {}
+    drop_discourse = {"intents": set(), "emotions": set()}
+    reset_satisfaction = False
+    reset_urgency = False
+    sanitation_warnings = []
+    entity_drop_codes = {
+        "invalid_source_field", "missing_evidence", "surface_evidence_mismatch",
+        "empty_canonical", "generic_entity", "duplicate_entity", "road_poi_conflict",
+        "intersection_shape_conflict", "request_action_as_behavior",
+        "canonical_evidence_conflict",
+    }
+
+    for warning in warnings or []:
+        if not isinstance(warning, str) or ":" not in warning:
+            if warning in {"satisfaction_missing_target_or_evidence", "template_politeness_as_satisfaction"}:
+                reset_satisfaction = True
+            elif warning in {"urgency_missing_evidence", "template_priority_as_urgency"}:
+                reset_urgency = True
+            continue
+        code, path = warning.split(":", 1)
+        parts = path.split(".")
+        if code in entity_drop_codes and len(parts) == 3 and parts[0] == "entities":
+            try:
+                drop_entities.setdefault(parts[1], set()).add(int(parts[2]))
+            except ValueError:
+                pass
+        elif code == "missing_evidence" and len(parts) == 3 and parts[0] == "discourse":
+            if parts[1] in drop_discourse:
+                try:
+                    drop_discourse[parts[1]].add(int(parts[2]))
+                except ValueError:
+                    pass
+        elif code == "missing_evidence" and path == "discourse.satisfaction":
+            reset_satisfaction = True
+        elif code == "missing_evidence" and path == "discourse.urgency":
+            reset_urgency = True
+
+    for group, indexes in drop_entities.items():
+        items = entities.get(group)
+        if not isinstance(items, list):
+            continue
+        for index in sorted(indexes, reverse=True):
+            if 0 <= index < len(items):
+                del items[index]
+                _add(sanitation_warnings, f"dropped_invalid_candidate:entities.{group}.{index}")
+
+    for group, indexes in drop_discourse.items():
+        items = discourse.get(group)
+        if not isinstance(items, list):
+            continue
+        for index in sorted(indexes, reverse=True):
+            if 0 <= index < len(items):
+                del items[index]
+                _add(sanitation_warnings, f"dropped_unverified_evidence:discourse.{group}.{index}")
+
+    if reset_satisfaction:
+        discourse["satisfaction"] = {"label": "unknown", "target": "", "evidence": ""}
+        _add(sanitation_warnings, "reset_unverified_satisfaction")
+    if reset_urgency:
+        discourse["urgency"] = {"level": "normal", "evidence": ""}
+        _add(sanitation_warnings, "reset_unverified_urgency")
+    cleaned["entities"] = entities
+    cleaned["discourse"] = discourse
+    return cleaned, sanitation_warnings
 
 
 def validate_semantic_output(order, semantic, parse_warnings=None):
@@ -63,6 +143,8 @@ def validate_semantic_output(order, semantic, parse_warnings=None):
         _add(warnings, "missing_doc_id")
     if not any(_text(order.get(field)) for field in SOURCE_FIELDS):
         _add(warnings, "empty_semantic_text")
+    if not _text(semantic.get("event_summary")):
+        _add(warnings, "empty_event_summary")
 
     entities = semantic.get("entities") if isinstance(semantic.get("entities"), dict) else {}
     seen = set()
@@ -121,7 +203,7 @@ def validate_semantic_output(order, semantic, parse_warnings=None):
             if not isinstance(item, dict):
                 continue
             evidence = _text(item.get("evidence"))
-            if evidence and not any(evidence in _text(order.get(field)) for field in SOURCE_FIELDS):
+            if not evidence or not any(evidence in _text(order.get(field)) for field in SOURCE_FIELDS):
                 _add(warnings, f"missing_evidence:discourse.{group}.{index}")
 
     satisfaction = discourse.get("satisfaction") if isinstance(discourse.get("satisfaction"), dict) else {}

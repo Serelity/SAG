@@ -1,6 +1,6 @@
 import unittest
 
-from ragflow_style_pipeline.sag_semantic_validation import validate_semantic_output
+from ragflow_style_pipeline.sag_semantic_validation import sanitize_semantic_output, validate_semantic_output
 
 
 def semantic_with(group, item):
@@ -51,6 +51,31 @@ class TestSemanticValidation(unittest.TestCase):
         result = validate_semantic_output(order, semantic)
         self.assertIn("possible_history_contamination", result["warnings"])
         self.assertIn("urgency_missing_evidence", result["warnings"])
+
+    def test_sanitizes_invalid_optional_candidates_and_safe_discourse_defaults(self):
+        semantic = semantic_with("problem_objects", {
+            "surface":"摊贩", "canonical":"流动摊贩",
+            "source_field":"case_content_clean", "evidence":"不存在的证据",
+        })
+        semantic["discourse"]["intents"] = [{"label":"投诉", "evidence":"不存在的意图证据"}]
+        semantic["discourse"]["emotions"] = [{"label":"不满", "intensity":2, "evidence":"不存在的情绪证据"}]
+        semantic["discourse"]["satisfaction"] = {"label":"satisfied", "target":"部门", "evidence":"谢谢"}
+        semantic["discourse"]["urgency"] = {"level":"high", "evidence":"请优先处理"}
+        validation = validate_semantic_output(self.order, semantic)
+        cleaned, actions = sanitize_semantic_output(semantic, validation["warnings"])
+        revalidated = validate_semantic_output(self.order, cleaned)
+
+        self.assertEqual(cleaned["entities"]["problem_objects"], [])
+        self.assertEqual(cleaned["discourse"]["intents"], [])
+        self.assertEqual(cleaned["discourse"]["emotions"], [])
+        self.assertEqual(cleaned["discourse"]["satisfaction"], {"label":"unknown", "target":"", "evidence":""})
+        self.assertEqual(cleaned["discourse"]["urgency"], {"level":"normal", "evidence":""})
+        self.assertEqual(revalidated["status"], "accepted")
+        self.assertIn("dropped_invalid_candidate:entities.problem_objects.0", actions)
+        self.assertIn("dropped_unverified_evidence:discourse.intents.0", actions)
+        self.assertIn("dropped_unverified_evidence:discourse.emotions.0", actions)
+        self.assertIn("reset_unverified_satisfaction", actions)
+        self.assertIn("reset_unverified_urgency", actions)
 
 
 if __name__ == "__main__":

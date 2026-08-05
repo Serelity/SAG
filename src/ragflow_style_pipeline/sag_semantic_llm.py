@@ -17,7 +17,7 @@ from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import build_repair_prompt, build_semantic_prompt
 from ragflow_style_pipeline.sag_semantic_schema import ENTITY_GROUPS, parse_semantic_json
-from ragflow_style_pipeline.sag_semantic_validation import validate_semantic_output
+from ragflow_style_pipeline.sag_semantic_validation import sanitize_semantic_output, validate_semantic_output
 from ragflow_style_pipeline.work_order_input import read_work_orders
 
 
@@ -131,7 +131,7 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         },
         "model_run": {
             "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
-            "prompt_version": str(config.get("prompt_version", "sag_semantic_v2")),
+            "prompt_version": str(config.get("prompt_version", "sag_semantic_v3")),
             "backend": str(config.get("backend", "transformers")),
             "input_tokens": generation["input_tokens"],
             "output_tokens": generation["output_tokens"],
@@ -139,6 +139,69 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
             "latency_ms": generation["latency_ms"],
         },
     }
+
+
+def _validate_with_sanitation(order, semantic, parse_warnings):
+    validation = validate_semantic_output(order, semantic, parse_warnings)
+    trace = {
+        "parse_warnings": list(parse_warnings or []),
+        "validation_before": validation,
+        "sanitation_warnings": [],
+    }
+    if validation["status"] != "repair_required":
+        trace["validation_after"] = validation
+        return semantic, validation, trace
+    if "json_parse_failed" in validation["warnings"] or "possible_history_contamination" in validation["warnings"]:
+        trace["validation_after"] = validation
+        return semantic, validation, trace
+    cleaned, sanitation_warnings = sanitize_semantic_output(semantic, validation["warnings"])
+    trace["sanitation_warnings"] = sanitation_warnings
+    if not sanitation_warnings:
+        trace["validation_after"] = validation
+        return semantic, validation, trace
+    cleaned_validation = validate_semantic_output(order, cleaned, parse_warnings)
+    if cleaned_validation["status"] in {"accepted", "accepted_with_warnings"}:
+        cleaned_validation = {
+            **cleaned_validation,
+            "status": "accepted_with_warnings",
+            "warnings": sanitation_warnings + cleaned_validation["warnings"],
+        }
+    trace["validation_after"] = cleaned_validation
+    return cleaned, cleaned_validation, trace
+
+
+def _diagnostic_identity(order):
+    value = f"{order.get('doc_id', '')}:{order.get('content_hash', '')}"
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _semantic_counts(semantic):
+    entities = semantic.get("entities") if isinstance(semantic, dict) else {}
+    discourse = semantic.get("discourse") if isinstance(semantic, dict) else {}
+    return {
+        "entities": {
+            group: len(entities.get(group, [])) if isinstance(entities, dict) and isinstance(entities.get(group), list) else 0
+            for group in ENTITY_GROUPS
+        },
+        "intents": len(discourse.get("intents", [])) if isinstance(discourse, dict) and isinstance(discourse.get("intents"), list) else 0,
+        "emotions": len(discourse.get("emotions", [])) if isinstance(discourse, dict) and isinstance(discourse.get("emotions"), list) else 0,
+        "satisfaction": (
+            discourse.get("satisfaction", {}).get("label", "unknown")
+            if isinstance(discourse, dict) and isinstance(discourse.get("satisfaction"), dict) else "unknown"
+        ),
+        "urgency": (
+            discourse.get("urgency", {}).get("level", "normal")
+            if isinstance(discourse, dict) and isinstance(discourse.get("urgency"), dict) else "normal"
+        ),
+    }
+
+
+def _append_diagnostic(path, event):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as output:
+        output.write(json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n")
+        output.flush()
 
 
 def _run_generator(generator, prompts, config):
@@ -153,6 +216,22 @@ def _run_generator(generator, prompts, config):
     if len(results) != len(prompts):
         raise RuntimeError(f"generator_result_count:{len(results)}:{len(prompts)}")
     return [_normalize_generation_result(value, int(config.get("max_new_tokens", 512))) for value in results]
+
+
+def _run_generator_with_diagnostics(generator, prompts, config, diagnostic_path, phase, batch_start):
+    _append_diagnostic(diagnostic_path, {
+        "event": "model_call_started", "ts": _utc_now(), "phase": phase,
+        "batch_start": batch_start, "order_count": len(prompts),
+    })
+    try:
+        return _run_generator(generator, prompts, config)
+    except Exception as error:
+        _append_diagnostic(diagnostic_path, {
+            "event": "model_call_failed", "ts": _utc_now(), "phase": phase,
+            "batch_start": batch_start, "order_count": len(prompts),
+            "exception_type": type(error).__name__,
+        })
+        raise
 
 
 def load_transformers_generator(model_path, enable_thinking=False):
@@ -180,6 +259,8 @@ def load_transformers_generator(model_path, enable_thinking=False):
         local_files_only=True,
         trust_remote_code=True,
     )
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     def generate(prompts, max_new_tokens=512, temperature=0.0):
         messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
@@ -203,6 +284,8 @@ def load_transformers_generator(model_path, enable_thinking=False):
             kwargs["temperature"] = float(temperature)
         with torch.inference_mode():
             generated = model.generate(**encoded, **kwargs)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
         elapsed_ms = (time.perf_counter() - started) * 1000
         continuation = generated[:, encoded.input_ids.shape[-1]:]
         texts = tokenizer.batch_decode(continuation, skip_special_tokens=True)
@@ -217,8 +300,29 @@ def load_transformers_generator(model_path, enable_thinking=False):
                 "finish_reason": "length" if output_tokens >= int(max_new_tokens) else "stop",
                 "latency_ms": round(elapsed_ms / max(1, len(texts)), 3),
             })
+        del encoded, generated, continuation
         return rows
 
+    def empty_cache():
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+    def memory_stats():
+        if not torch.cuda.is_available():
+            return {
+                "current_allocated_gb": 0.0, "current_reserved_gb": 0.0,
+                "peak_allocated_gb": 0.0, "peak_reserved_gb": 0.0,
+            }
+        scale = 1024 ** 3
+        return {
+            "current_allocated_gb": round(torch.cuda.memory_allocated() / scale, 3),
+            "current_reserved_gb": round(torch.cuda.memory_reserved() / scale, 3),
+            "peak_allocated_gb": round(torch.cuda.max_memory_allocated() / scale, 3),
+            "peak_reserved_gb": round(torch.cuda.max_memory_reserved() / scale, 3),
+        }
+
+    generate.empty_cache = empty_cache
+    generate.memory_stats = memory_stats
     return generate
 
 
@@ -250,7 +354,7 @@ def _quality_report(records, rejects):
 def run_semantic_extraction(
     input_path, output_path, rejects_path, run_report_path, quality_report_path,
     model_path, config, limit=None, resume=False, retry_rejected=False, generator=None,
-    doc_ids=None,
+    doc_ids=None, diagnostic_path=None,
 ):
     """Run one primary request per order and at most one selective repair."""
     del retry_rejected  # Rejected rows are selected with doc_ids for an explicit safe rerun.
@@ -258,12 +362,26 @@ def run_semantic_extraction(
     started_at = _utc_now()
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
-    prompt_version = str(config.get("prompt_version", "sag_semantic_v2"))
+    prompt_version = str(config.get("prompt_version", "sag_semantic_v3"))
     output_path = Path(output_path)
     rejects_path = Path(rejects_path)
     partial_path = Path(str(output_path) + ".partial.jsonl")
     checkpoint_path = Path(str(output_path) + ".checkpoint.json")
-    orders = read_work_orders(input_path, limit=limit)
+    diagnostic_path = Path(diagnostic_path or (str(output_path) + ".diagnostics.jsonl"))
+    if not resume:
+        diagnostic_path.unlink(missing_ok=True)
+    _append_diagnostic(diagnostic_path, {
+        "event": "run_initialized", "ts": _utc_now(),
+        "schema": "privacy_safe_diagnostics_v1", "resume": bool(resume),
+    })
+    try:
+        orders = read_work_orders(input_path, limit=limit)
+    except Exception as error:
+        _append_diagnostic(diagnostic_path, {
+            "event": "run_failed", "ts": _utc_now(), "stage": "input_read",
+            "exception_type": type(error).__name__,
+        })
+        raise
     if doc_ids is not None:
         selected = set(doc_ids)
         orders = [order for order in orders if order["doc_id"] in selected]
@@ -278,9 +396,6 @@ def run_semantic_extraction(
         order for order in orders
         if _identity(order["doc_id"], order["content_hash"], prompt_version, model_id) not in completed
     ]
-    if generator is None:
-        generator = load_transformers_generator(model_path, enable_thinking=bool(config.get("enable_thinking", False)))
-
     records = list(existing)
     rejects = []
     primary_requests = 0
@@ -289,18 +404,53 @@ def run_semantic_extraction(
     batch_size = max(1, int(config.get("batch_size", 8)))
     checkpoint_every = max(1, int(config.get("checkpoint_every", 50)))
     ordered_pending = _bucket_orders(pending, config.get("length_bucket_boundaries", [600, 1400]))
+    _append_diagnostic(diagnostic_path, {
+        "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
+        "orders_input": len(orders), "orders_pending": len(pending), "batch_size": batch_size,
+        "max_new_tokens": int(config.get("max_new_tokens", 512)),
+        "prompt_version": prompt_version, "model": model_id,
+    })
+    if generator is None:
+        try:
+            generator = load_transformers_generator(
+                model_path, enable_thinking=bool(config.get("enable_thinking", False))
+            )
+        except Exception as error:
+            _append_diagnostic(diagnostic_path, {
+                "event": "run_failed", "ts": _utc_now(), "stage": "model_load",
+                "exception_type": type(error).__name__,
+            })
+            raise
+    backend_memory_reader = getattr(generator, "memory_stats", None)
+    backend_memory = backend_memory_reader() if callable(backend_memory_reader) else {}
+    _append_diagnostic(diagnostic_path, {
+        "event": "backend_ready", "ts": _utc_now(), **backend_memory,
+    })
 
     for batch_start in range(0, len(ordered_pending), batch_size):
         indexed_batch = ordered_pending[batch_start:batch_start + batch_size]
         batch = [order for _index, order in indexed_batch]
-        generated = _run_generator(generator, [build_semantic_prompt(order, config) for order in batch], config)
+        generated = _run_generator_with_diagnostics(
+            generator, [build_semantic_prompt(order, config) for order in batch], config,
+            diagnostic_path, "primary", batch_start,
+        )
         primary_requests += len(batch)
         generation_rows.extend(generated)
         repair_queue = []
         for order, result in zip(batch, generated):
             semantic, parse_warnings = parse_semantic_json(result["text"])
-            validation = validate_semantic_output(order, semantic, parse_warnings)
-            if validation["status"] == "repair_required" and int(config.get("max_repairs_per_order", 1)) > 0:
+            semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
+            repair_requested = validation["status"] == "repair_required" and int(config.get("max_repairs_per_order", 1)) > 0
+            _append_diagnostic(diagnostic_path, {
+                "event": "model_result", "ts": _utc_now(), "phase": "primary",
+                "order_ref": _diagnostic_identity(order),
+                "source_chars": len(order.get("chunk_text", "")),
+                "input_tokens": result["input_tokens"], "output_tokens": result["output_tokens"],
+                "finish_reason": result["finish_reason"], "latency_ms": result["latency_ms"],
+                **trace, "semantic_counts": _semantic_counts(semantic),
+                "repair_requested": repair_requested,
+            })
+            if repair_requested:
                 repair_queue.append((order, result, semantic, validation))
             elif validation["status"] in {"accepted", "accepted_with_warnings"}:
                 records.append(_record(order, semantic, validation, result, config, False))
@@ -311,15 +461,24 @@ def run_semantic_extraction(
                 })
 
         if repair_queue:
-            repair_results = _run_generator(generator, [
+            repair_results = _run_generator_with_diagnostics(generator, [
                 build_repair_prompt(order, primary["text"], validation["warnings"], config)
                 for order, primary, _semantic, validation in repair_queue
-            ], config)
+            ], config, diagnostic_path, "repair", batch_start)
             repair_requests += len(repair_queue)
             generation_rows.extend(repair_results)
             for (order, primary, _semantic, first_validation), repaired in zip(repair_queue, repair_results):
                 semantic, parse_warnings = parse_semantic_json(repaired["text"])
-                validation = validate_semantic_output(order, semantic, parse_warnings)
+                semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
+                _append_diagnostic(diagnostic_path, {
+                    "event": "model_result", "ts": _utc_now(), "phase": "repair",
+                    "order_ref": _diagnostic_identity(order),
+                    "source_chars": len(order.get("chunk_text", "")),
+                    "input_tokens": repaired["input_tokens"], "output_tokens": repaired["output_tokens"],
+                    "finish_reason": repaired["finish_reason"], "latency_ms": repaired["latency_ms"],
+                    **trace, "semantic_counts": _semantic_counts(semantic),
+                    "repair_requested": False,
+                })
                 if validation["status"] in {"accepted", "accepted_with_warnings"}:
                     records.append(_record(order, semantic, validation, repaired, config, True))
                 else:
@@ -332,6 +491,17 @@ def run_semantic_extraction(
                         "primary_validation": first_validation,
                         "primary_response": primary["text"], "repair_response": repaired["text"],
                     })
+
+        if bool(config.get("empty_cache_between_batches", True)):
+            cleanup = getattr(generator, "empty_cache", None)
+            if callable(cleanup):
+                cleanup()
+        memory_reader = getattr(generator, "memory_stats", None)
+        if callable(memory_reader):
+            _append_diagnostic(diagnostic_path, {
+                "event": "batch_memory", "ts": _utc_now(),
+                "batch_start": batch_start, **memory_reader(),
+            })
 
         if len(records) % checkpoint_every == 0 or batch_start + batch_size >= len(ordered_pending):
             _write_jsonl(partial_path, records)
@@ -348,6 +518,11 @@ def run_semantic_extraction(
     finish_reasons = Counter(row["finish_reason"] for row in generation_rows)
     input_tokens = [row["input_tokens"] for row in generation_rows]
     output_tokens = [row["output_tokens"] for row in generation_rows]
+    memory_reader = getattr(generator, "memory_stats", None)
+    gpu_memory = memory_reader() if callable(memory_reader) else {
+        "current_allocated_gb": 0.0, "current_reserved_gb": 0.0,
+        "peak_allocated_gb": 0.0, "peak_reserved_gb": 0.0,
+    }
     run_report = {
         "model": model_id,
         "backend": str(config.get("backend", "transformers")),
@@ -373,7 +548,19 @@ def run_semantic_extraction(
         "ended_at": _utc_now(),
         "checkpoint": str(checkpoint_path),
         "resumed_records": len(existing),
+        "gpu_current_allocated_gb": gpu_memory["current_allocated_gb"],
+        "gpu_current_reserved_gb": gpu_memory["current_reserved_gb"],
+        "gpu_peak_allocated_gb": gpu_memory["peak_allocated_gb"],
+        "gpu_peak_reserved_gb": gpu_memory["peak_reserved_gb"],
+        "empty_cache_between_batches": bool(config.get("empty_cache_between_batches", True)),
+        "diagnostic_log": str(diagnostic_path),
     }
+    _append_diagnostic(diagnostic_path, {
+        "event": "run_completed", "ts": _utc_now(),
+        "records_written": len(records), "rejects_written": len(rejects),
+        "primary_requests": primary_requests, "repair_requests": repair_requests,
+        "elapsed_seconds": round(elapsed, 3), **gpu_memory,
+    })
     _atomic_json(run_report_path, run_report)
     _atomic_json(quality_report_path, _quality_report(records, rejects))
     return run_report
@@ -389,9 +576,11 @@ def parse_args(argv=None):
     parser.add_argument("--config", required=True)
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--limit", type=int)
+    parser.add_argument("--batch-size", type=int)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-rejected", action="store_true")
     parser.add_argument("--doc-id-file")
+    parser.add_argument("--diagnostic-log", default="")
     parser.add_argument("--allow-raw-tsv", action="store_true")
     return parser.parse_args(argv)
 
@@ -401,6 +590,10 @@ def main(argv=None):
     if Path(args.input).suffix.lower() == ".tsv":
         raise SystemExit("Semantic extraction requires desensitized multiview JSONL; raw TSV remains on the legacy controlled path.")
     config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    if args.batch_size is not None:
+        if args.batch_size < 1:
+            raise SystemExit("--batch-size must be at least 1")
+        config["batch_size"] = args.batch_size
     doc_ids = None
     if args.doc_id_file:
         doc_ids = [line.strip() for line in Path(args.doc_id_file).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -408,6 +601,7 @@ def main(argv=None):
         args.input, args.output, args.rejects, args.run_report, args.quality_report,
         args.model_path, config, limit=args.limit, resume=args.resume,
         retry_rejected=args.retry_rejected, doc_ids=doc_ids,
+        diagnostic_path=args.diagnostic_log or None,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

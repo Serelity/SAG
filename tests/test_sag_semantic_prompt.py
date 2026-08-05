@@ -147,7 +147,7 @@ class TestSemanticPrompt(unittest.TestCase):
         self.assertNotIn("case_content_windows", payload)
         self.assertLessEqual(len(payload["case_content_clean"]), 80)
         self.assertTrue(payload["input_window_info"]["truncated"])
-        self.assertIn("field 绝不能填写 input_window_info", prompt)
+        self.assertIn("绝不能作为 field/evidence", prompt)
 
     def test_prompt_labels_history_and_current_markers_without_rule_assertion(self):
         order = {
@@ -213,7 +213,7 @@ class TestSemanticPrompt(unittest.TestCase):
         config = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(config, {
             "schema_version": "2.0",
-            "prompt_version": "sag_semantic_v2",
+            "prompt_version": "sag_semantic_v3",
             "model_id": "Qwen/Qwen3-4B",
             "model_path": "models/Qwen3-4B",
             "backend": "transformers",
@@ -226,6 +226,7 @@ class TestSemanticPrompt(unittest.TestCase):
             "checkpoint_every": 50,
             "max_repairs_per_order": 1,
             "length_bucket_boundaries": [600, 1400],
+            "empty_cache_between_batches": True,
             "default_output": "outputs/work_order_semantics.qwen3_4b.jsonl",
             "default_rejects": "outputs/work_order_semantics.rejects.jsonl",
         })
