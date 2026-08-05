@@ -215,7 +215,7 @@ class TestSemanticPrompt(unittest.TestCase):
         config = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(config, {
             "schema_version": "2.0",
-            "prompt_version": "sag_semantic_v5",
+            "prompt_version": "sag_semantic_v6",
             "model_id": "Qwen/Qwen3-4B",
             "model_path": "models/Qwen3-4B",
             "backend": "transformers",
@@ -233,6 +233,7 @@ class TestSemanticPrompt(unittest.TestCase):
             "repair_max_new_tokens": 768,
             "temperature": 0.0,
             "batch_size": 8,
+            "repair_batch_size": 8,
             "progress_every": 50,
             "checkpoint_every": 50,
             "max_repairs_per_order": 1,

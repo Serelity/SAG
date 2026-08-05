@@ -48,7 +48,8 @@ import json
 import sys
 report = json.load(open(sys.argv[1], encoding="utf-8"))
 keys = (
-    "backend", "batch_size", "records_written", "rejects_written", "repair_requests",
+    "prompt_version", "backend", "batch_size", "repair_batch_size", "records_written", "rejects_written",
+    "primary_batches", "repair_requests", "repair_batches",
     "truncation_count", "elapsed_seconds", "orders_per_second",
     "output_tokens_per_second", "gpu_peak_allocated_gb", "gpu_peak_reserved_gb",
     "attn_implementation", "cache_implementation", "prefix_caching",

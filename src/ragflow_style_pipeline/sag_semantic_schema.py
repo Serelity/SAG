@@ -11,12 +11,13 @@ ENTITY_GROUPS = (
     "intersections",
     "pois",
 )
-SOURCE_FIELDS = {
-    "title_clean",
+SOURCE_FIELD_ORDER = (
     "case_content_clean",
+    "title_clean",
     "case_goal_clean",
     "address_detail_clean",
-}
+)
+SOURCE_FIELDS = set(SOURCE_FIELD_ORDER)
 INTENTS = {"投诉", "举报", "求助", "咨询", "建议", "表扬", "催办", "反馈", "其他"}
 EMOTIONS = {"愤怒", "不满", "焦虑", "无奈", "悲伤", "感谢", "认可"}
 SATISFACTION_LABELS = {"satisfied", "dissatisfied", "mixed", "unknown"}
@@ -75,7 +76,7 @@ def _normalize_entity_item(item):
     }
 
 
-def _normalize_entities(value, warnings):
+def _normalize_entities(value, warnings, preserve_overflow=False):
     entities = value if isinstance(value, dict) else {}
     normalized = {}
     for group in ENTITY_GROUPS:
@@ -87,6 +88,21 @@ def _normalize_entities(value, warnings):
 
         group_items = []
         for index, item in enumerate(items):
+            if isinstance(item, str) and item.strip():
+                # Keep a string candidate long enough for the order-aware layer
+                # to prove that it is an exact clean-field substring.  This is
+                # safer than either trusting it immediately or discarding a
+                # potentially valid road/POI before evidence validation.
+                text = item.strip()
+                normalized_index = len(group_items)
+                group_items.append({
+                    "surface": text,
+                    "canonical": text,
+                    "source_field": "",
+                    "evidence": text,
+                })
+                _warn(warnings, f"coerced_entity_string:{group}:{normalized_index}")
+                continue
             if not isinstance(item, dict):
                 _warn(warnings, f"malformed_entity_item:{group}:{index}")
                 continue
@@ -95,7 +111,7 @@ def _normalize_entities(value, warnings):
         limit = GROUP_LIMITS[group]
         if len(items) > limit:
             _warn(warnings, f"group_limit_exceeded:{group}")
-        normalized[group] = group_items[:limit]
+        normalized[group] = group_items if preserve_overflow else group_items[:limit]
     return normalized
 
 
@@ -167,13 +183,17 @@ def _normalize_urgency(value, warnings):
     if level not in URGENCY_LEVELS:
         level = "normal"
         _warn(warnings, "invalid_urgency_level")
+    evidence = _text(value.get("evidence"))
+    if level == "normal" and evidence:
+        evidence = ""
+        _warn(warnings, "cleared_normal_urgency_evidence")
     return {
         "level": level,
-        "evidence": _text(value.get("evidence")),
+        "evidence": evidence,
     }
 
 
-def _normalize(value):
+def _normalize(value, preserve_overflow=False):
     warnings = []
     value = _without_confidence(value) if isinstance(value, dict) else {}
     entities = value.get("entities", {})
@@ -187,7 +207,9 @@ def _normalize(value):
 
     normalized = {
         "event_summary": _text(value.get("event_summary")),
-        "entities": _normalize_entities(entities, warnings),
+        "entities": _normalize_entities(
+            entities, warnings, preserve_overflow=preserve_overflow
+        ),
         "discourse": {
             "intents": _normalize_intents(discourse.get("intents", []), warnings),
             "emotions": _normalize_emotions(discourse.get("emotions", []), warnings),
@@ -252,11 +274,15 @@ def _first_json_object(text):
             return None
 
 
-def parse_semantic_json(text):
-    """Parse the first complete JSON object and return normalization warnings."""
+def parse_semantic_json(text, preserve_overflow=False):
+    """Parse the first complete JSON object and return normalization warnings.
+
+    ``preserve_overflow`` is reserved for extraction orchestration, which can
+    validate all candidates before enforcing final group limits.
+    """
     if not isinstance(text, str):
         return normalize_semantic_output({}), ["json_parse_failed"]
     value = _first_json_object(_strip_single_fence(text))
     if value is None:
         return normalize_semantic_output({}), ["json_parse_failed"]
-    return _normalize(value)
+    return _normalize(value, preserve_overflow=bool(preserve_overflow))

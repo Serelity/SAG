@@ -64,7 +64,12 @@ def summarize(path):
             elif event == "run_completed":
                 completed = {
                     key: row.get(key)
-                    for key in ("records_written", "rejects_written", "primary_requests", "repair_requests", "elapsed_seconds", "current_allocated_gb", "current_reserved_gb", "peak_allocated_gb", "peak_reserved_gb")
+                    for key in (
+                        "records_written", "rejects_written", "primary_requests", "repair_requests",
+                        "primary_batches", "repair_batches", "elapsed_seconds",
+                        "current_allocated_gb", "current_reserved_gb",
+                        "peak_allocated_gb", "peak_reserved_gb",
+                    )
                     if key in row
                 }
 

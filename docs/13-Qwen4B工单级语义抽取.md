@@ -70,7 +70,7 @@ python scripts/check_semantic_run.py \
   --quality-report outputs/work_order_semantics.quality.json
 ```
 
-检查：无 OOM；processed 数量正确；每工单一次 primary；repair 不超过 repair-required 数量；`finish_reason=length` 可解释；报告中不含 prompt、正文、evidence 或原始响应。当前 `sag_semantic_v5` 的 primary 上限为 640 tokens，只有整单 repair 使用 768 tokens，避免修复响应再次在 512 tokens 被截断。v5 会对候选级 sanitation 做最多三轮确定性复核，直到稳定；JSON 失败和历史污染不会被确定性改写。
+检查：无 OOM；processed 数量正确；每工单一次 primary；repair 不超过 repair-required 数量；`finish_reason=length` 可解释；报告中不含 prompt、正文、evidence 或原始响应。当前 `sag_semantic_v6` 的 primary 上限为 640 tokens，只有整单 repair 使用 768 tokens，避免修复响应再次被截断。v6 会对候选级 sanitation 做最多三轮确定性复核，并仅在字符串 entity 逐字存在于 clean field 且满足 road/intersection/POI 类型 gate 时恢复；显式投诉/举报/咨询/建议等 intent 可回退到连续原词 evidence。单道路方向描述不再作为 intersection，纯退款/销课/注销等诉求动作不作为 behavior，normal urgency 清空 evidence，非法 satisfaction target 回退 unknown。JSON 失败和历史污染不会被确定性改写。
 
 每次运行默认同时生成隐私安全诊断日志：
 
@@ -98,7 +98,7 @@ bash scripts/project_semantics_to_sag.sh
 LIMIT=995 bash scripts/build_sag_semantic_100k.sh
 ```
 
-人工抽样必须覆盖：开放领域主题、诉求动作/问题行为、road/POI、历史答复/当前立场、模板谢谢、对象态度/诉求人情绪和 discourse。验证器通过率不能当作准确率。
+人工抽样必须覆盖：开放领域主题、诉求动作/问题行为、road/POI、历史答复/当前立场、模板谢谢、对象态度/诉求人情绪和 discourse。验证器通过率不能当作准确率。重点比较 quality report 中 `all_entities_empty_rate`、`intent_coverage`、`repair_attempted_count` 及 warning counts；字符串 entity 恢复必须同时满足逐字 evidence 和类型 gate。
 
 ## 6. 100k 与恢复
 
@@ -110,7 +110,7 @@ LIMIT=32 BATCH_SIZES="4 8 16" bash scripts/benchmark_semantic_batches.sh
 
 脚本为每个 batch size 启动独立进程，避免前一轮 CUDA cache 干扰后一轮；比较 `orders_per_second`、`output_tokens_per_second`、reject/repair 和 GPU 峰值，以质量不下降条件下吞吐最高者作为 995 配置。Transformers 路径使用 SDPA 和 KV cache，批次间默认不调用 `empty_cache()`，以复用 allocator；应依据 current allocated 判断真实张量是否增长，reserved 增长本身不等于泄漏。
 
-batch 8 的 32 条实测为 32/32 records、0 reject、1 repair、0 truncation、`0.1895 orders/s`、峰值 allocated/reserved `10.387/12.572GB`。相对 batch 1 提升约 2.9 倍，但 100k 仍约需 6.1 天，因此不能作为最终生产配置。先用剩余显存测试 Transformers 16/32：
+Transformers batch 8 的 32 条实测为 32/32 records、0 reject、1 repair、0 truncation、`0.1895 orders/s`、峰值 allocated/reserved `10.387/12.572GB`。相对 batch 1 提升约 2.9 倍，但 100k 仍约需 6.1 天，因此不能作为最终生产配置。先用剩余显存测试 Transformers 16/32：
 
 ```bash
 BACKEND=transformers LIMIT=32 BATCH_SIZES="16 32" \
@@ -127,7 +127,7 @@ BACKEND=vllm LIMIT=50 BATCH_SIZES="50" \
   bash scripts/benchmark_semantic_batches.sh
 ```
 
-默认 vLLM 配置为 FP16、`gpu_memory_utilization=0.85`、`max_model_len=4096`、`max_num_seqs=64`、prefix caching=false、chunked prefill=false，并保留 CUDA graph。若关闭 prefix caching 后仍出现同一 LLVM 错误，第二级回退设置 `VLLM_ENFORCE_EAGER=1`；eager 会降低吞吐，只用于确认是否为剩余编译路径。发生 OOM 时先设置 `VLLM_GPU_MEMORY_UTILIZATION=0.75` 或降低 batch；启动时提示上下文不足才增加 `VLLM_MAX_MODEL_LEN`，不要盲目增大。后端只改变推理执行，不改变 Prompt、schema、validator 和投影；checkpoint 身份仍为 `(doc_id, content_hash, prompt_version, model_id)`。benchmark/smoke 必须使用全新目录，不设置 `RESUME=1`。995 样本质量通过后运行：
+默认 vLLM 配置为 FP16、`gpu_memory_utilization=0.85`、`max_model_len=4096`、`max_num_seqs=64`、prefix caching=false、chunked prefill=false，并保留 CUDA graph。V100 batch 32 的 v5 smoke 已达到约 `1.56 orders/s` primary 稳态吞吐；v6 会把跨 primary batch 的待修工单聚合到 `repair_batch_size`（默认 8），避免 singleton repair 成为主要耗时。每条工单仍最多一次 repair；报告用 `primary_requests/repair_requests` 表示工单请求条数，用 `primary_batches/repair_batches` 表示实际模型批次数。可通过 `REPAIR_BATCH_SIZE=16` 独立调优。若关闭 prefix caching 后仍出现同一 LLVM 错误，第二级回退设置 `VLLM_ENFORCE_EAGER=1`；eager 会降低吞吐，只用于确认是否为剩余编译路径。发生 OOM 时先设置 `VLLM_GPU_MEMORY_UTILIZATION=0.75` 或降低 batch；启动时提示上下文不足才增加 `VLLM_MAX_MODEL_LEN`，不要盲目增大。后端只改变推理执行，不改变 Prompt、schema、validator 和投影；checkpoint 身份仍为 `(doc_id, content_hash, prompt_version, model_id)`。benchmark/smoke 必须使用全新目录，不设置 `RESUME=1`。995 样本质量通过后运行：
 
 ```bash
 LIMIT=100000 bash scripts/extract_semantics_qwen3_4b.sh

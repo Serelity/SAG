@@ -16,8 +16,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import build_repair_prompt, build_semantic_prompt
-from ragflow_style_pipeline.sag_semantic_schema import ENTITY_GROUPS, parse_semantic_json
-from ragflow_style_pipeline.sag_semantic_validation import sanitize_semantic_output, validate_semantic_output
+from ragflow_style_pipeline.sag_semantic_schema import ENTITY_GROUPS, GROUP_LIMITS, parse_semantic_json
+from ragflow_style_pipeline.sag_semantic_validation import (
+    enrich_semantic_output,
+    sanitize_semantic_output,
+    validate_semantic_output,
+)
 from ragflow_style_pipeline.work_order_input import read_work_orders
 
 
@@ -156,7 +160,7 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         },
         "model_run": {
             "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
-            "prompt_version": str(config.get("prompt_version", "sag_semantic_v5")),
+            "prompt_version": str(config.get("prompt_version", "sag_semantic_v6")),
             "backend": str(config.get("backend", "transformers")),
             "input_tokens": generation["input_tokens"],
             "output_tokens": generation["output_tokens"],
@@ -167,13 +171,39 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
 
 
 def _validate_with_sanitation(order, semantic, parse_warnings):
+    semantic, enrichment_actions = enrich_semantic_output(order, semantic, parse_warnings)
     validation = validate_semantic_output(order, semantic, parse_warnings)
     trace = {
         "parse_warnings": list(parse_warnings or []),
         "validation_before": validation,
-        "sanitation_warnings": [],
+        "sanitation_warnings": list(enrichment_actions),
     }
     if validation["status"] != "repair_required":
+        overflow = any(
+            isinstance(semantic.get("entities", {}).get(group), list)
+            and len(semantic["entities"][group]) > limit
+            for group, limit in GROUP_LIMITS.items()
+        )
+        final_actions = list(enrichment_actions)
+        if overflow:
+            semantic, limit_actions = sanitize_semantic_output(
+                semantic, validation["warnings"], order=order
+            )
+            for action in limit_actions:
+                if action not in final_actions:
+                    final_actions.append(action)
+            validation = validate_semantic_output(order, semantic, parse_warnings)
+        if final_actions:
+            final_warnings = list(final_actions)
+            for warning in validation["warnings"]:
+                if warning not in final_warnings:
+                    final_warnings.append(warning)
+            validation = {
+                **validation,
+                "status": "accepted_with_warnings",
+                "warnings": final_warnings,
+            }
+        trace["sanitation_warnings"] = final_actions
         trace["validation_after"] = validation
         return semantic, validation, trace
     if "json_parse_failed" in validation["warnings"] or "possible_history_contamination" in validation["warnings"]:
@@ -182,9 +212,11 @@ def _validate_with_sanitation(order, semantic, parse_warnings):
 
     cleaned = semantic
     cleaned_validation = validation
-    sanitation_warnings = []
+    sanitation_warnings = list(enrichment_actions)
     for _pass in range(3):
-        next_cleaned, actions = sanitize_semantic_output(cleaned, cleaned_validation["warnings"])
+        next_cleaned, actions = sanitize_semantic_output(
+            cleaned, cleaned_validation["warnings"], order=order
+        )
         for action in actions:
             if action not in sanitation_warnings:
                 sanitation_warnings.append(action)
@@ -522,6 +554,11 @@ def _quality_report(records, rejects):
         warning for row in records for warning in row.get("validation", {}).get("warnings", [])
     )
     group_counts = {group: [len(row.get("entities", {}).get(group, [])) for row in records] for group in ENTITY_GROUPS}
+    empty_entity_records = sum(
+        not any(row.get("entities", {}).get(group, []) for group in ENTITY_GROUPS)
+        for row in records
+    )
+    intent_records = sum(bool(row.get("discourse", {}).get("intents", [])) for row in records)
     return {
         "records": len(records),
         "rejects": len(rejects),
@@ -532,6 +569,12 @@ def _quality_report(records, rejects):
             for group, counts in group_counts.items()
         },
         "entity_count_distributions": {group: dict(Counter(counts)) for group, counts in group_counts.items()},
+        "all_entities_empty_count": empty_entity_records,
+        "all_entities_empty_rate": empty_entity_records / len(records) if records else 0.0,
+        "intent_coverage": intent_records / len(records) if records else 0.0,
+        "repair_attempted_count": sum(
+            bool(row.get("validation", {}).get("repair_attempted")) for row in records
+        ),
         "canonical_differs_from_surface": sum(
             item.get("canonical") != item.get("surface")
             for row in records for group in ENTITY_GROUPS for item in row.get("entities", {}).get(group, [])
@@ -552,7 +595,7 @@ def run_semantic_extraction(
     started_at = _utc_now()
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
-    prompt_version = str(config.get("prompt_version", "sag_semantic_v5"))
+    prompt_version = str(config.get("prompt_version", "sag_semantic_v6"))
     backend = str(config.get("backend", "transformers")).strip().lower()
     output_path = Path(output_path)
     rejects_path = Path(rejects_path)
@@ -590,6 +633,7 @@ def run_semantic_extraction(
     records = list(existing)
     rejects = []
     batch_size = max(1, int(config.get("batch_size", 8)))
+    repair_batch_size = max(1, int(config.get("repair_batch_size", batch_size)))
     checkpoint_every = max(1, int(config.get("checkpoint_every", 50)))
     if resume and output_path.exists():
         _write_jsonl(partial_path, existing)
@@ -601,11 +645,14 @@ def run_semantic_extraction(
     processed_since_checkpoint = 0
     primary_requests = 0
     repair_requests = 0
+    primary_batches = 0
+    repair_batches = 0
     generation_rows = []
     ordered_pending = _bucket_orders(pending, config.get("length_bucket_boundaries", [600, 1400]))
     _append_diagnostic(diagnostic_path, {
         "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
         "orders_input": len(orders), "orders_pending": len(pending), "batch_size": batch_size,
+        "repair_batch_size": repair_batch_size,
         "max_new_tokens": int(config.get("max_new_tokens", 512)),
         "repair_max_new_tokens": int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))),
         "prompt_version": prompt_version, "model": model_id, "backend": backend,
@@ -631,49 +678,27 @@ def run_semantic_extraction(
         **backend_memory,
     })
 
-    for batch_start in range(0, len(ordered_pending), batch_size):
-        indexed_batch = ordered_pending[batch_start:batch_start + batch_size]
-        batch = [order for _index, order in indexed_batch]
-        generated = _run_generator_with_diagnostics(
-            generator, [build_semantic_prompt(order, config) for order in batch], config,
-            diagnostic_path, "primary", batch_start,
-        )
-        primary_requests += len(batch)
-        generation_rows.extend(generated)
-        repair_queue = []
-        for order, result in zip(batch, generated):
-            semantic, parse_warnings = parse_semantic_json(result["text"])
-            semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
-            repair_requested = validation["status"] == "repair_required" and int(config.get("max_repairs_per_order", 1)) > 0
-            _append_diagnostic(diagnostic_path, {
-                "event": "model_result", "ts": _utc_now(), "phase": "primary",
-                "order_ref": _diagnostic_identity(order),
-                "source_chars": len(order.get("chunk_text", "")),
-                "input_tokens": result["input_tokens"], "output_tokens": result["output_tokens"],
-                "finish_reason": result["finish_reason"], "latency_ms": result["latency_ms"],
-                **trace, "semantic_counts": _semantic_counts(semantic),
-                "repair_requested": repair_requested,
-            })
-            if repair_requested:
-                repair_queue.append((order, result, semantic, validation))
-            elif validation["status"] in {"accepted", "accepted_with_warnings"}:
-                records.append(_record(order, semantic, validation, result, config, False))
-            else:
-                rejects.append({
-                    "doc_id": order["doc_id"], "content_hash": order["content_hash"],
-                    "validation": validation, "primary_response": result["text"],
-                })
+    repair_queue = []
 
-        if repair_queue:
+    def flush_repairs(force=False):
+        nonlocal repair_requests, repair_batches
+        while len(repair_queue) >= repair_batch_size or (force and repair_queue):
+            queue_size = min(repair_batch_size, len(repair_queue))
+            queued = repair_queue[:queue_size]
+            del repair_queue[:queue_size]
+            repair_batch_start = repair_requests
             repair_results = _run_generator_with_diagnostics(generator, [
                 build_repair_prompt(order, primary["text"], validation["warnings"], config)
-                for order, primary, _semantic, validation in repair_queue
-            ], config, diagnostic_path, "repair", batch_start,
+                for order, primary, _semantic, validation in queued
+            ], config, diagnostic_path, "repair", repair_batch_start,
                 max_new_tokens=int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))))
-            repair_requests += len(repair_queue)
+            repair_requests += len(queued)
+            repair_batches += 1
             generation_rows.extend(repair_results)
-            for (order, primary, _semantic, first_validation), repaired in zip(repair_queue, repair_results):
-                semantic, parse_warnings = parse_semantic_json(repaired["text"])
+            for (order, primary, _semantic, first_validation), repaired in zip(queued, repair_results):
+                semantic, parse_warnings = parse_semantic_json(
+                    repaired["text"], preserve_overflow=True
+                )
                 semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
                 _append_diagnostic(diagnostic_path, {
                     "event": "model_result", "ts": _utc_now(), "phase": "repair",
@@ -696,6 +721,43 @@ def run_semantic_extraction(
                         "primary_validation": first_validation,
                         "primary_response": primary["text"], "repair_response": repaired["text"],
                     })
+
+    for batch_start in range(0, len(ordered_pending), batch_size):
+        indexed_batch = ordered_pending[batch_start:batch_start + batch_size]
+        batch = [order for _index, order in indexed_batch]
+        generated = _run_generator_with_diagnostics(
+            generator, [build_semantic_prompt(order, config) for order in batch], config,
+            diagnostic_path, "primary", batch_start,
+        )
+        primary_requests += len(batch)
+        primary_batches += 1
+        generation_rows.extend(generated)
+        for order, result in zip(batch, generated):
+            semantic, parse_warnings = parse_semantic_json(
+                result["text"], preserve_overflow=True
+            )
+            semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
+            repair_requested = validation["status"] == "repair_required" and int(config.get("max_repairs_per_order", 1)) > 0
+            _append_diagnostic(diagnostic_path, {
+                "event": "model_result", "ts": _utc_now(), "phase": "primary",
+                "order_ref": _diagnostic_identity(order),
+                "source_chars": len(order.get("chunk_text", "")),
+                "input_tokens": result["input_tokens"], "output_tokens": result["output_tokens"],
+                "finish_reason": result["finish_reason"], "latency_ms": result["latency_ms"],
+                **trace, "semantic_counts": _semantic_counts(semantic),
+                "repair_requested": repair_requested,
+            })
+            if repair_requested:
+                repair_queue.append((order, result, semantic, validation))
+            elif validation["status"] in {"accepted", "accepted_with_warnings"}:
+                records.append(_record(order, semantic, validation, result, config, False))
+            else:
+                rejects.append({
+                    "doc_id": order["doc_id"], "content_hash": order["content_hash"],
+                    "validation": validation, "primary_response": result["text"],
+                })
+
+        flush_repairs(force=batch_start + batch_size >= len(ordered_pending))
 
         if bool(config.get("empty_cache_between_batches", True)):
             cleanup = getattr(generator, "empty_cache", None)
@@ -733,9 +795,11 @@ def run_semantic_extraction(
     }
     run_report = {
         "model": model_id,
+        "prompt_version": prompt_version,
         "backend": backend,
         "dtype": os.environ.get("SEMANTIC_LLM_DTYPE", "auto"),
         "batch_size": batch_size,
+        "repair_batch_size": repair_batch_size,
         "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
         "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
         "prefix_caching": bool(getattr(generator, "prefix_caching", False)),
@@ -748,6 +812,8 @@ def run_semantic_extraction(
         "rejects_written": len(rejects),
         "primary_requests": primary_requests,
         "repair_requests": repair_requests,
+        "primary_batches": primary_batches,
+        "repair_batches": repair_batches,
         "input_tokens_total": sum(input_tokens),
         "output_tokens_total": sum(output_tokens),
         "input_tokens_p50": _percentile(input_tokens, 0.5),
@@ -777,6 +843,7 @@ def run_semantic_extraction(
         "event": "run_completed", "ts": _utc_now(),
         "records_written": len(records), "rejects_written": len(rejects),
         "primary_requests": primary_requests, "repair_requests": repair_requests,
+        "primary_batches": primary_batches, "repair_batches": repair_batches,
         "elapsed_seconds": round(elapsed, 3), **gpu_memory,
     })
     _atomic_json(run_report_path, run_report)
@@ -795,6 +862,7 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--repair-batch-size", type=int)
     parser.add_argument("--backend", choices=("transformers", "vllm"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-rejected", action="store_true")
@@ -813,6 +881,10 @@ def main(argv=None):
         if args.batch_size < 1:
             raise SystemExit("--batch-size must be at least 1")
         config["batch_size"] = args.batch_size
+    if args.repair_batch_size is not None:
+        if args.repair_batch_size < 1:
+            raise SystemExit("--repair-batch-size must be at least 1")
+        config["repair_batch_size"] = args.repair_batch_size
     if args.backend is not None:
         config["backend"] = args.backend
     doc_ids = None

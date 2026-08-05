@@ -188,6 +188,73 @@ class TestSemanticLlm(unittest.TestCase):
             "aligned_canonical_to_surface:entities.problem_behaviors.0",
         ])
 
+    def test_invalid_overflow_candidate_does_not_crowd_out_later_valid_item(self):
+        order = {
+            "doc_id":"order_overflow", "title_clean":"",
+            "case_content_clean":"路灯、灯杆、配电箱均有故障",
+            "case_goal_clean":"", "address_detail_clean":"",
+        }
+        semantic = {
+            "event_summary":"照明设施故障",
+            "entities":{
+                "problem_objects":[
+                    {"surface":"虚构对象", "canonical":"虚构对象", "source_field":"case_content_clean", "evidence":"虚构对象"},
+                    {"surface":"路灯", "canonical":"路灯", "source_field":"case_content_clean", "evidence":"路灯"},
+                    {"surface":"灯杆", "canonical":"灯杆", "source_field":"case_content_clean", "evidence":"灯杆"},
+                    {"surface":"配电箱", "canonical":"配电箱", "source_field":"case_content_clean", "evidence":"配电箱"},
+                ],
+                "problem_behaviors":[], "roads":[], "intersections":[], "pois":[],
+            },
+            "discourse":{
+                "intents":[], "emotions":[],
+                "satisfaction":{"label":"unknown", "target":"", "evidence":""},
+                "urgency":{"level":"normal", "evidence":""},
+            },
+        }
+        cleaned, validation, trace = _validate_with_sanitation(
+            order, semantic, ["group_limit_exceeded:problem_objects"]
+        )
+        self.assertEqual(
+            [item["canonical"] for item in cleaned["entities"]["problem_objects"]],
+            ["路灯", "灯杆", "配电箱"],
+        )
+        self.assertEqual(validation["status"], "accepted_with_warnings")
+        self.assertIn(
+            "dropped_invalid_candidate:entities.problem_objects.0",
+            trace["sanitation_warnings"],
+        )
+
+    def test_repairs_are_aggregated_across_primary_batches(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir); source = tmp/"orders.jsonl"
+            source.write_text("".join(
+                json.dumps({
+                    "doc_id":f"order_{index}",
+                    "case_content_clean":"港龙新港城北门口有摊贩占道。",
+                }, ensure_ascii=False) + "\n"
+                for index in range(3)
+            ), encoding="utf-8")
+            generator = RecordingGenerator(True)
+            report = run_semantic_extraction(
+                source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
+                {
+                    "model_id":"Qwen/Qwen3-4B", "prompt_version":"sag_semantic_v6",
+                    "batch_size":1, "repair_batch_size":3, "checkpoint_every":1,
+                    "max_new_tokens":640, "repair_max_new_tokens":768,
+                },
+                generator=generator,
+            )
+            rows = [json.loads(line) for line in (tmp/"semantic.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual([len(call) for call in generator.calls], [1, 1, 1, 3])
+        self.assertEqual(generator.token_limits, [640, 640, 640, 768])
+        self.assertEqual(report["primary_requests"], 3)
+        self.assertEqual(report["repair_requests"], 3)
+        self.assertEqual(report["primary_batches"], 3)
+        self.assertEqual(report["repair_batches"], 1)
+        self.assertEqual(report["repair_batch_size"], 3)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(row["validation"]["repair_attempted"] for row in rows))
+
     def test_incremental_checkpoint_preserves_all_batched_records(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir); source = tmp/"orders.jsonl"
@@ -327,10 +394,11 @@ class TestSemanticLlm(unittest.TestCase):
         overridden = parse_args([
             "--input","safe.multiview.jsonl","--output","outputs/a.jsonl","--rejects","outputs/r.jsonl",
             "--run-report","outputs/run.json","--quality-report","outputs/q.json","--config","config.json",
-            "--model-path","models/Qwen3-4B","--batch-size","1","--backend","vllm",
-            "--diagnostic-log","outputs/d.jsonl",
+            "--model-path","models/Qwen3-4B","--batch-size","1","--repair-batch-size","4",
+            "--backend","vllm","--diagnostic-log","outputs/d.jsonl",
         ])
         self.assertEqual(overridden.batch_size, 1)
+        self.assertEqual(overridden.repair_batch_size, 4)
         self.assertEqual(overridden.backend, "vllm")
         self.assertEqual(overridden.diagnostic_log, "outputs/d.jsonl")
 

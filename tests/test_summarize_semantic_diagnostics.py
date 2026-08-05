@@ -53,6 +53,8 @@ class TestSummarizeSemanticDiagnostics(unittest.TestCase):
                 "rejects_written": 0,
                 "primary_requests": 1,
                 "repair_requests": 0,
+                "primary_batches": 1,
+                "repair_batches": 0,
                 "elapsed_seconds": 1.5,
             },
         ]
@@ -75,6 +77,8 @@ class TestSummarizeSemanticDiagnostics(unittest.TestCase):
         self.assertEqual(result["memory_by_batch"][0]["peak_reserved_gb"], 13.0)
         self.assertEqual(result["failure_counts"], {})
         self.assertEqual(result["last_event"], "run_completed")
+        self.assertEqual(result["run_completed"]["primary_batches"], 1)
+        self.assertEqual(result["run_completed"]["repair_batches"], 0)
         self.assertEqual(json.loads(output.getvalue()), result)
 
 
