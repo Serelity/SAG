@@ -131,7 +131,7 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         },
         "model_run": {
             "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
-            "prompt_version": str(config.get("prompt_version", "sag_semantic_v3")),
+            "prompt_version": str(config.get("prompt_version", "sag_semantic_v4")),
             "backend": str(config.get("backend", "transformers")),
             "input_tokens": generation["input_tokens"],
             "output_tokens": generation["output_tokens"],
@@ -204,10 +204,11 @@ def _append_diagnostic(path, event):
         output.flush()
 
 
-def _run_generator(generator, prompts, config):
+def _run_generator(generator, prompts, config, max_new_tokens=None):
+    token_limit = int(max_new_tokens if max_new_tokens is not None else config.get("max_new_tokens", 512))
     results = generator(
         prompts,
-        max_new_tokens=int(config.get("max_new_tokens", 512)),
+        max_new_tokens=token_limit,
         temperature=float(config.get("temperature", 0.0)),
     )
     if isinstance(results, (str, dict)):
@@ -215,16 +216,20 @@ def _run_generator(generator, prompts, config):
     results = list(results)
     if len(results) != len(prompts):
         raise RuntimeError(f"generator_result_count:{len(results)}:{len(prompts)}")
-    return [_normalize_generation_result(value, int(config.get("max_new_tokens", 512))) for value in results]
+    return [_normalize_generation_result(value, token_limit) for value in results]
 
 
-def _run_generator_with_diagnostics(generator, prompts, config, diagnostic_path, phase, batch_start):
+def _run_generator_with_diagnostics(
+    generator, prompts, config, diagnostic_path, phase, batch_start, max_new_tokens=None,
+):
+    token_limit = int(max_new_tokens if max_new_tokens is not None else config.get("max_new_tokens", 512))
     _append_diagnostic(diagnostic_path, {
         "event": "model_call_started", "ts": _utc_now(), "phase": phase,
         "batch_start": batch_start, "order_count": len(prompts),
+        "max_new_tokens": token_limit,
     })
     try:
-        return _run_generator(generator, prompts, config)
+        return _run_generator(generator, prompts, config, max_new_tokens=token_limit)
     except Exception as error:
         _append_diagnostic(diagnostic_path, {
             "event": "model_call_failed", "ts": _utc_now(), "phase": phase,
@@ -362,7 +367,7 @@ def run_semantic_extraction(
     started_at = _utc_now()
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
-    prompt_version = str(config.get("prompt_version", "sag_semantic_v3"))
+    prompt_version = str(config.get("prompt_version", "sag_semantic_v4"))
     output_path = Path(output_path)
     rejects_path = Path(rejects_path)
     partial_path = Path(str(output_path) + ".partial.jsonl")
@@ -408,6 +413,7 @@ def run_semantic_extraction(
         "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
         "orders_input": len(orders), "orders_pending": len(pending), "batch_size": batch_size,
         "max_new_tokens": int(config.get("max_new_tokens", 512)),
+        "repair_max_new_tokens": int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))),
         "prompt_version": prompt_version, "model": model_id,
     })
     if generator is None:
@@ -464,7 +470,8 @@ def run_semantic_extraction(
             repair_results = _run_generator_with_diagnostics(generator, [
                 build_repair_prompt(order, primary["text"], validation["warnings"], config)
                 for order, primary, _semantic, validation in repair_queue
-            ], config, diagnostic_path, "repair", batch_start)
+            ], config, diagnostic_path, "repair", batch_start,
+                max_new_tokens=int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))))
             repair_requests += len(repair_queue)
             generation_rows.extend(repair_results)
             for (order, primary, _semantic, first_validation), repaired in zip(repair_queue, repair_results):

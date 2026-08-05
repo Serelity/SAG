@@ -52,6 +52,20 @@ class TestSemanticValidation(unittest.TestCase):
         self.assertIn("possible_history_contamination", result["warnings"])
         self.assertIn("urgency_missing_evidence", result["warnings"])
 
+    def test_aligns_surface_to_verified_source_evidence_without_dropping_entity(self):
+        semantic = semantic_with("problem_behaviors", {
+            "surface":"占道经营", "canonical":"占道经营",
+            "source_field":"case_content_clean", "evidence":"摊贩占道",
+        })
+        validation = validate_semantic_output(self.order, semantic)
+        self.assertIn("surface_evidence_mismatch:entities.problem_behaviors.0", validation["warnings"])
+        cleaned, actions = sanitize_semantic_output(semantic, validation["warnings"])
+        revalidated = validate_semantic_output(self.order, cleaned)
+        self.assertEqual(cleaned["entities"]["problem_behaviors"][0]["surface"], "摊贩占道")
+        self.assertEqual(cleaned["entities"]["problem_behaviors"][0]["canonical"], "占道经营")
+        self.assertEqual(revalidated["status"], "accepted")
+        self.assertEqual(actions, ["aligned_surface_to_evidence:entities.problem_behaviors.0"])
+
     def test_sanitizes_invalid_optional_candidates_and_safe_discourse_defaults(self):
         semantic = semantic_with("problem_objects", {
             "surface":"摊贩", "canonical":"流动摊贩",

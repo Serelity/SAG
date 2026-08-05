@@ -9,10 +9,12 @@ from ragflow_style_pipeline.sag_semantic_llm import parse_args, run_semantic_ext
 class RecordingGenerator:
     def __init__(self, repair_primary=True):
         self.calls = []
+        self.token_limits = []
         self.repair_primary = repair_primary
 
     def __call__(self, prompts, max_new_tokens, temperature):
         self.calls.append(list(prompts))
+        self.token_limits.append(max_new_tokens)
         rows = []
         for prompt in prompts:
             repair = "只修复" in prompt
@@ -47,11 +49,12 @@ class TestSemanticLlm(unittest.TestCase):
             generator = RecordingGenerator()
             summary = run_semantic_extraction(
                 source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v3","batch_size":8,"max_new_tokens":512,"temperature":0.0,"max_repairs_per_order":1,"checkpoint_every":1},
+                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":8,"max_new_tokens":640,"repair_max_new_tokens":768,"temperature":0.0,"max_repairs_per_order":1,"checkpoint_every":1},
                 generator=generator,
             )
             record = json.loads((tmp/"semantic.jsonl").read_text(encoding="utf-8"))
         self.assertEqual(len(generator.calls), 2)
+        self.assertEqual(generator.token_limits, [640, 768])
         self.assertEqual(summary["primary_requests"], 1)
         self.assertEqual(summary["repair_requests"], 1)
         self.assertTrue(record["validation"]["repair_attempted"])
@@ -77,7 +80,7 @@ class TestSemanticLlm(unittest.TestCase):
             diagnostic = tmp/"diagnostics.jsonl"
             summary = run_semantic_extraction(
                 source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v3","batch_size":1,"checkpoint_every":1},
+                {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":1,"checkpoint_every":1},
                 generator=generator, diagnostic_path=diagnostic,
             )
             record = json.loads((tmp/"semantic.jsonl").read_text(encoding="utf-8"))
@@ -113,7 +116,7 @@ class TestSemanticLlm(unittest.TestCase):
             with self.assertRaises((ValueError, json.JSONDecodeError)):
                 run_semantic_extraction(
                     source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v3","batch_size":1},
+                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":1},
                     generator=RecordingGenerator(False), diagnostic_path=diagnostic,
                 )
             diagnostics = [json.loads(line) for line in diagnostic.read_text(encoding="utf-8").splitlines()]
@@ -135,7 +138,7 @@ class TestSemanticLlm(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 run_semantic_extraction(
                     source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
-                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v3","batch_size":1},
+                    {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":1},
                     generator=FailingGenerator(), diagnostic_path=diagnostic,
                 )
             diagnostics = [json.loads(line) for line in diagnostic.read_text(encoding="utf-8").splitlines()]
@@ -148,7 +151,7 @@ class TestSemanticLlm(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)
             paths = [tmp/name for name in ("semantic.jsonl","rejects.jsonl","run.json","quality.json")]
-            config = {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v3","batch_size":8,"checkpoint_every":1}
+            config = {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v4","batch_size":8,"checkpoint_every":1}
             first = RecordingGenerator(False)
             run_semantic_extraction(source, *paths, "unused", config, generator=first)
             second = RecordingGenerator(False)

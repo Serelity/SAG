@@ -50,7 +50,7 @@ python scripts/check_semantic_run.py \
   --quality-report outputs/work_order_semantics.quality.json
 ```
 
-检查：无 OOM；processed 数量正确；每工单一次 primary；repair 不超过 repair-required 数量；`finish_reason=length` 可解释；报告中不含 prompt、正文、evidence 或原始响应。
+检查：无 OOM；processed 数量正确；每工单一次 primary；repair 不超过 repair-required 数量；`finish_reason=length` 可解释；报告中不含 prompt、正文、evidence 或原始响应。当前 `sag_semantic_v4` 的 primary 上限为 640 tokens，只有整单 repair 使用 768 tokens，避免修复响应再次在 512 tokens 被截断。
 
 每次运行默认同时生成隐私安全诊断日志：
 
@@ -129,7 +129,7 @@ outputs/sag_semantic.qwen3_4b.100k.duckdb
 ## 9. 故障恢复
 
 - OOM：降低 `batch_size`，从 checkpoint `RESUME=1`；不要删除已完成 partial。
-- 大量 `length`：提高服务器显存允许范围内的 `max_new_tokens`，先重跑 smoke。
+- 大量 `length`：先确认 diagnostics 中 primary/repair 的 `max_new_tokens` 分别为 640/768；仍有截断时再调整配置并升级 `prompt_version`，不要直接复用旧 checkpoint。
 - 大量 repair：用 `summarize_semantic_diagnostics.py` 对比 `validation_before`、候选级 sanitation 和 `validation_after`，不要默认所有工单双调用。
 - OOM 或调用异常：查看 diagnostics 最后一条是 `run_failed:model_load` 还是 `model_call_failed`，并结合 `batch_memory` 的 current/peak allocated/reserved 区分模型常驻张量、临时峰值和 PyTorch reserved cache。
 - ID 对不上：确认 input、semantics、projection 使用同一稳定 `doc_id/content_hash`。

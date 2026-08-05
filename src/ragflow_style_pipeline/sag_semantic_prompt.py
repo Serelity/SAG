@@ -290,7 +290,7 @@ _COMPACT_RULES = """你是面向 SAG 检索的 12345 工单语义结构化器，
 event_summary：完整概括当前事件和诉求，不编造；历史答复不得覆盖“不认可、仍未解决、再次要求”等当前立场。
 实体：problem_objects 是具体领域对象；problem_behaviors 是问题现象/异常状态，维修、清理、修剪、拆除、处理等纯诉求动作不得作为 behavior。road 仅具体命名道路；intersection 须明确路口/道路组合；poi 是小区、学校、医院、市场、机构等。港龙新港城北门口是 poi，不是 road。泛词不抽取，canonical 保守。
 每个实体严格为 {surface, canonical, field, evidence}；field 只能是 title_clean、case_content_clean、case_goal_clean、address_detail_clean；evidence 必须是该字段中的连续原文，surface 也必须忠实来自 evidence。
-Discourse：intents 最多3，取投诉/举报/求助/咨询/建议/表扬/催办/反馈/其他；emotions 最多2，取愤怒/不满/焦虑/无奈/悲伤/感谢/认可，intensity=1/2/3，无直接证据则空。对象态度恶劣不等于诉求人愤怒。satisfaction 取 satisfied/dissatisfied/mixed/unknown，非 unknown 必须有 target 和直接 evidence；模板“谢谢/感谢转交/请优先处理”不能判定满意。urgency 取 normal/high/critical；“优先处理”不能单独升高，critical 仅当前人身/火灾/燃气/坍塌等紧迫风险。
+Discourse：intents 必须是最多3个 {label,evidence} 对象，例 [{"label":"投诉","evidence":"要求调查处理"}]，label 只能取投诉/举报/求助/咨询/建议/表扬/催办/反馈/其他；emotions 必须是最多2个 {label,intensity,evidence} 对象，例 [{"label":"不满","intensity":2,"evidence":"其不认可"}]，label 只能取愤怒/不满/焦虑/无奈/悲伤/感谢/认可，intensity=1/2/3。禁止输出字符串数组、英文标签或“投诉举报”等组合标签；无直接连续原文 evidence 则空数组。对象态度恶劣不等于诉求人愤怒。satisfaction 取 satisfied/dissatisfied/mixed/unknown，非 unknown 必须有 target 和直接 evidence；模板“谢谢/感谢转交/请优先处理”不能判定满意。urgency 取 normal/high/critical；“优先处理”不能单独升高，critical 仅当前人身/火灾/燃气/坍塌等紧迫风险。
 上限：objects3、behaviors4、roads4、intersections2、pois4；没有可靠证据就输出空数组。不要输出 confidence、Markdown、解释或思维链。"""
 
 _COMPACT_FEW_SHOTS = """示例 1：输入“和平路路灯连续三天不亮，希望维修”→object=路灯；behavior=照明故障，surface/evidence=连续三天不亮；road=和平路；维修是诉求动作。

@@ -94,6 +94,8 @@ class TestSemanticPrompt(unittest.TestCase):
         self.assertIn("不能判定满意", prompt)
         self.assertIn("诉求动作", prompt)
         self.assertIn('"problem_objects"', prompt)
+        self.assertIn("intents 必须是最多3个 {label,evidence} 对象", prompt)
+        self.assertIn("禁止输出字符串数组、英文标签或“投诉举报”等组合标签", prompt)
         self.assertNotIn('"confidence"', prompt)
 
     def test_prompt_contains_all_approved_cross_domain_examples(self):
@@ -213,13 +215,14 @@ class TestSemanticPrompt(unittest.TestCase):
         config = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(config, {
             "schema_version": "2.0",
-            "prompt_version": "sag_semantic_v3",
+            "prompt_version": "sag_semantic_v4",
             "model_id": "Qwen/Qwen3-4B",
             "model_path": "models/Qwen3-4B",
             "backend": "transformers",
             "enable_thinking": False,
             "max_input_chars": 2200,
-            "max_new_tokens": 512,
+            "max_new_tokens": 640,
+            "repair_max_new_tokens": 768,
             "temperature": 0.0,
             "batch_size": 8,
             "progress_every": 50,
