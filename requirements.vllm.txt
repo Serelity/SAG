@@ -1,4 +1,4 @@
-# Optional Linux/NVIDIA inference backend. Install in an isolated Conda environment
-# after confirming the server CUDA driver is compatible with the selected wheel.
--r requirements.entity.txt
-vllm>=0.8.5,<0.10.0
+# Optional Linux/NVIDIA V100 inference backend for Qwen3.
+# Keep this environment independent from the Transformers environment: vLLM wheels
+# are binary-coupled to their own PyTorch/CUDA/XFormers dependency set.
+vllm==0.8.5

@@ -15,12 +15,14 @@ pip install -r requirements.sag.txt
 pip install -r requirements.entity.txt
 ```
 
-PyTorch 必须按服务器 CUDA 环境单独安装，不在基础 requirements 中固定。默认 Transformers 后端继续使用现有 `ragflow-embed` 环境。可选 vLLM 后端不要直接污染该环境，应先克隆：
+PyTorch 必须按服务器 CUDA 环境单独安装，不在基础 requirements 中固定。默认 Transformers 后端继续使用现有 `ragflow-embed` 环境。vLLM wheel 与特定 PyTorch/CUDA/XFormers 二进制栈绑定，**不要 clone `ragflow-embed`**，也不要在原环境上强行覆盖 Torch；使用全新 Python 3.11 环境并安装固定的 `vllm==0.8.5`：
 
 ```bash
-conda create -n sag-vllm --clone ragflow-embed -y
+conda create -n sag-vllm python=3.11 -y
 conda activate sag-vllm
-python -m pip install -r requirements.vllm.txt
+python -m pip install --upgrade pip setuptools wheel
+python -m pip install --only-binary=vllm -r requirements.vllm.txt
+python -m pip check
 python - <<'PY'
 import torch, vllm
 print({
@@ -32,7 +34,7 @@ print({
 PY
 ```
 
-安装失败时删除 `sag-vllm` 环境即可，不影响 Transformers 回退。V100 路径会在导入 vLLM 前默认设置 `VLLM_USE_V1=0` 和 `VLLM_ATTENTION_BACKEND=XFORMERS`；用户显式设置的环境变量优先。模型目录默认：
+`--only-binary=vllm` 可阻止 pip 静默转为耗时且易失败的 vLLM 源码编译。若安装失败，先保存 pip 输出末尾，不要在同一半安装环境反复重试；删除并重建 `sag-vllm` 即可，不影响 Transformers 回退。V100 路径会在导入 vLLM 前默认设置 `VLLM_USE_V1=0` 和 `VLLM_ATTENTION_BACKEND=XFORMERS`；用户显式设置的环境变量优先。模型目录默认：
 
 ```text
 models/Qwen3-4B
@@ -171,7 +173,8 @@ outputs/sag_semantic.qwen3_4b.100k.duckdb
 ## 9. 故障恢复
 
 - Transformers OOM：降低 `batch_size`，从 checkpoint `RESUME=1`；不要删除已完成 partial。
-- vLLM 安装/启动失败：确认处于隔离 `sag-vllm` 环境并保留完整 console 日志；V100 必须使用 V0/XFormers。若仍失败，切回 `BACKEND=transformers`，不要修改原 `ragflow-embed` 环境。
+- vLLM 安装失败：确认 Linux x86_64、Python 3.9–3.12（推荐 3.11）、pip 可看到 `vllm==0.8.5` wheel、磁盘空间充足；不要 clone 原环境。resolver 报 torch/xformers/triton 冲突时删除并重建全新环境，不使用 `--no-deps`。
+- vLLM 启动失败：保留完整 console 日志；V100 必须使用 V0/XFormers/FP16。若仍失败，切回 `BACKEND=transformers`，不要修改原 `ragflow-embed` 环境。
 - vLLM OOM：先将 `VLLM_GPU_MEMORY_UTILIZATION` 从 0.85 降至 0.75，再降低 batch；paged KV cache 会预留显存，不能只用 PyTorch allocated 判断整卡占用。
 - 大量 `length`：先确认 diagnostics 中 primary/repair 的 `max_new_tokens` 分别为 640/768；仍有截断时再调整配置并升级 `prompt_version`，不要直接复用旧 checkpoint。
 - 大量 repair：用 `summarize_semantic_diagnostics.py` 对比 `validation_before`、候选级 sanitation 和 `validation_after`，不要默认所有工单双调用。
