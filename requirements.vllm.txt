@@ -2,3 +2,6 @@
 # Keep this environment independent from the Transformers environment: vLLM wheels
 # are binary-coupled to their own PyTorch/CUDA/XFormers dependency set.
 vllm==0.8.5
+# vLLM 0.8.5 requires transformers>=4.51.1. Pin the compatible release family
+# instead of resolving to a much newer transformers 5.x package.
+transformers==4.51.3

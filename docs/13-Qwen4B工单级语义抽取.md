@@ -21,7 +21,8 @@ PyTorch 必须按服务器 CUDA 环境单独安装，不在基础 requirements �
 conda create -n sag-vllm python=3.11 -y
 conda activate sag-vllm
 python -m pip install --upgrade pip setuptools wheel
-python -m pip install --only-binary=vllm -r requirements.vllm.txt
+python -m pip install --timeout 120 --retries 10 --prefer-binary \
+  --only-binary=vllm -r requirements.vllm.txt
 python -m pip check
 python - <<'PY'
 import torch, vllm
@@ -34,7 +35,7 @@ print({
 PY
 ```
 
-`--only-binary=vllm` 可阻止 pip 静默转为耗时且易失败的 vLLM 源码编译。若安装失败，先保存 pip 输出末尾，不要在同一半安装环境反复重试；删除并重建 `sag-vllm` 即可，不影响 Transformers 回退。V100 路径会在导入 vLLM 前默认设置 `VLLM_USE_V1=0` 和 `VLLM_ATTENTION_BACKEND=XFORMERS`；用户显式设置的环境变量优先。模型目录默认：
+`--only-binary=vllm` 可阻止 pip 静默转为耗时且易失败的 vLLM 源码编译。项目同时固定 `transformers==4.51.3`，避免 vLLM 0.8.5 的宽松下限解析到不兼容的 Transformers 5.x。若镜像出现 `ReadTimeoutError`，不要删除已经缓存的 326MB vLLM wheel；用命令行 `--index-url` 切换可访问的 PyPI 镜像，并保留 `--timeout 120 --retries 10`。若安装失败，先保存 pip 输出末尾，不要在同一半安装环境反复强装；必要时删除并重建 `sag-vllm`，不影响 Transformers 回退。V100 路径会在导入 vLLM 前默认设置 `VLLM_USE_V1=0` 和 `VLLM_ATTENTION_BACKEND=XFORMERS`；用户显式设置的环境变量优先。模型目录默认：
 
 ```text
 models/Qwen3-4B
