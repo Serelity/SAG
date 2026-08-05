@@ -117,7 +117,7 @@ BACKEND=transformers LIMIT=32 BATCH_SIZES="16 32" \
   bash scripts/benchmark_semantic_batches.sh
 ```
 
-随后在隔离的 `sag-vllm` 环境测试 offline continuous batching、paged KV cache 和 prefix caching。vLLM 的 batch size 是一次提交给调度器的工单数；由于输出长度差异很大，建议先测 32，再用 50 条 smoke 测 50，995 阶段再测 64：
+随后在隔离的 `sag-vllm` 环境测试 offline continuous batching 和 paged KV cache。V100 + Torch 2.6/Triton 3.2 的 prefix-prefill 内核可能直接触发 `LLVM ERROR: Failed to compute parent layout for slice layout`，因此该硬件路径默认关闭 prefix caching 和 chunked prefill。vLLM 的 batch size 是一次提交给调度器的工单数；由于输出长度差异很大，建议先测 32，再用 50 条 smoke 测 50，995 阶段再测 64：
 
 ```bash
 conda activate sag-vllm
@@ -127,7 +127,7 @@ BACKEND=vllm LIMIT=50 BATCH_SIZES="50" \
   bash scripts/benchmark_semantic_batches.sh
 ```
 
-默认 vLLM 配置为 FP16、`gpu_memory_utilization=0.85`、`max_model_len=4096`、`max_num_seqs=64` 和 prefix caching。发生 OOM 时先设置 `VLLM_GPU_MEMORY_UTILIZATION=0.75` 或降低 batch；启动时提示上下文不足才增加 `VLLM_MAX_MODEL_LEN`，不要盲目增大。后端只改变推理执行，不改变 Prompt、schema、validator 和投影；checkpoint 身份仍为 `(doc_id, content_hash, prompt_version, model_id)`。benchmark/smoke 必须使用全新目录，不设置 `RESUME=1`。995 样本质量通过后运行：
+默认 vLLM 配置为 FP16、`gpu_memory_utilization=0.85`、`max_model_len=4096`、`max_num_seqs=64`、prefix caching=false、chunked prefill=false，并保留 CUDA graph。若关闭 prefix caching 后仍出现同一 LLVM 错误，第二级回退设置 `VLLM_ENFORCE_EAGER=1`；eager 会降低吞吐，只用于确认是否为剩余编译路径。发生 OOM 时先设置 `VLLM_GPU_MEMORY_UTILIZATION=0.75` 或降低 batch；启动时提示上下文不足才增加 `VLLM_MAX_MODEL_LEN`，不要盲目增大。后端只改变推理执行，不改变 Prompt、schema、validator 和投影；checkpoint 身份仍为 `(doc_id, content_hash, prompt_version, model_id)`。benchmark/smoke 必须使用全新目录，不设置 `RESUME=1`。995 样本质量通过后运行：
 
 ```bash
 LIMIT=100000 bash scripts/extract_semantics_qwen3_4b.sh
@@ -175,7 +175,7 @@ outputs/sag_semantic.qwen3_4b.100k.duckdb
 
 - Transformers OOM：降低 `batch_size`，从 checkpoint `RESUME=1`；不要删除已完成 partial。
 - vLLM 安装失败：确认 Linux x86_64、Python 3.9–3.12（推荐 3.11）、pip 可看到 `vllm==0.8.5` wheel、磁盘空间充足；不要 clone 原环境。resolver 报 torch/xformers/triton 冲突时删除并重建全新环境，不使用 `--no-deps`。
-- vLLM 启动失败：保留完整 console 日志；V100 必须使用 V0/XFormers/FP16。若仍失败，切回 `BACKEND=transformers`，不要修改原 `ragflow-embed` 环境。
+- vLLM 启动失败：保留完整 console 日志；V100 必须使用 V0/XFormers/FP16。若首次生成出现 `Failed to compute parent layout for slice layout`，确认日志为 `enable_prefix_caching=False`、`chunked_prefill_enabled=False`；仍失败再设置 `VLLM_ENFORCE_EAGER=1`。不要改为 FP32：4B 权重和 KV cache 显存会显著增加且吞吐更差。若仍失败，切回 `BACKEND=transformers`，不要修改原 `ragflow-embed` 环境。
 - vLLM OOM：先将 `VLLM_GPU_MEMORY_UTILIZATION` 从 0.85 降至 0.75，再降低 batch；paged KV cache 会预留显存，不能只用 PyTorch allocated 判断整卡占用。
 - 大量 `length`：先确认 diagnostics 中 primary/repair 的 `max_new_tokens` 分别为 640/768；仍有截断时再调整配置并升级 `prompt_version`，不要直接复用旧 checkpoint。
 - 大量 repair：用 `summarize_semantic_diagnostics.py` 对比 `validation_before`、候选级 sanitation 和 `validation_after`，不要默认所有工单双调用。

@@ -52,6 +52,7 @@ keys = (
     "truncation_count", "elapsed_seconds", "orders_per_second",
     "output_tokens_per_second", "gpu_peak_allocated_gb", "gpu_peak_reserved_gb",
     "attn_implementation", "cache_implementation", "prefix_caching",
+    "chunked_prefill", "enforce_eager",
 )
 print(json.dumps({key: report.get(key) for key in keys}, ensure_ascii=False))
 PY

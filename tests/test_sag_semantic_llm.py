@@ -275,7 +275,9 @@ class TestSemanticLlm(unittest.TestCase):
             rows = generator(["工单一", "工单二"], max_new_tokens=640, temperature=0.0)
         self.assertEqual(captured["engine"]["dtype"], "float16")
         self.assertEqual(captured["engine"]["max_num_seqs"], 64)
-        self.assertTrue(captured["engine"]["enable_prefix_caching"])
+        self.assertFalse(captured["engine"]["enable_prefix_caching"])
+        self.assertFalse(captured["engine"]["enable_chunked_prefill"])
+        self.assertFalse(captured["engine"]["enforce_eager"])
         self.assertEqual(captured["generate"][0], ["templated:工单一", "templated:工单二"])
         self.assertEqual(captured["generate"][1], {"temperature":0.0, "max_tokens":640})
         self.assertFalse(captured["generate"][2])
@@ -283,19 +285,25 @@ class TestSemanticLlm(unittest.TestCase):
         self.assertEqual(rows[0]["input_tokens"], 2)
         self.assertEqual(rows[0]["output_tokens"], 3)
         self.assertEqual(generator.cache_implementation, "paged")
-        self.assertTrue(generator.prefix_caching)
+        self.assertFalse(generator.prefix_caching)
+        self.assertFalse(generator.chunked_prefill)
+        self.assertFalse(generator.enforce_eager)
 
     def test_configured_generator_routes_vllm_without_importing_it_locally(self):
         sentinel = object()
         config = {
             "backend":"vllm", "enable_thinking":False,
             "vllm_gpu_memory_utilization":0.85, "vllm_max_model_len":4096,
-            "vllm_max_num_seqs":64, "vllm_enable_prefix_caching":True,
+            "vllm_max_num_seqs":64, "vllm_enable_prefix_caching":False,
+            "vllm_enable_chunked_prefill":False, "vllm_enforce_eager":False,
         }
         environment = {
             "VLLM_GPU_MEMORY_UTILIZATION":"0.8",
             "VLLM_MAX_MODEL_LEN":"3072",
             "VLLM_MAX_NUM_SEQS":"32",
+            "VLLM_ENABLE_PREFIX_CACHING":"true",
+            "VLLM_ENABLE_CHUNKED_PREFILL":"false",
+            "VLLM_ENFORCE_EAGER":"true",
         }
         with patch.dict(os.environ, environment), patch(
             "ragflow_style_pipeline.sag_semantic_llm.load_vllm_generator", return_value=sentinel,
@@ -306,6 +314,7 @@ class TestSemanticLlm(unittest.TestCase):
             "models/Qwen3-4B", enable_thinking=False,
             gpu_memory_utilization=0.8, max_model_len=3072,
             max_num_seqs=32, enable_prefix_caching=True,
+            enable_chunked_prefill=False, enforce_eager=True,
         )
         with self.assertRaisesRegex(ValueError, "unsupported_backend"):
             _load_configured_generator("unused", {"backend":"unknown"})

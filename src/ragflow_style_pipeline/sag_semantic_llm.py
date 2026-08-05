@@ -30,6 +30,18 @@ def _config_hash(config):
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
+def _environment_bool(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return bool(default)
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"invalid_boolean_environment:{name}")
+
+
 def _identity(doc_id, content_hash, prompt_version, model_id):
     return "\u241f".join((doc_id, content_hash, prompt_version, model_id))
 
@@ -369,12 +381,15 @@ def load_transformers_generator(
     generate.attn_implementation = str(attn_implementation or "default")
     generate.cache_implementation = str(cache_implementation or "dynamic")
     generate.prefix_caching = False
+    generate.chunked_prefill = False
+    generate.enforce_eager = False
     return generate
 
 
 def load_vllm_generator(
     model_path, enable_thinking=False, gpu_memory_utilization=0.85,
-    max_model_len=4096, max_num_seqs=64, enable_prefix_caching=True,
+    max_model_len=4096, max_num_seqs=64, enable_prefix_caching=False,
+    enable_chunked_prefill=False, enforce_eager=False,
 ):
     """Load an offline vLLM backend with a safe V100 compatibility fallback."""
     model_path = Path(model_path)
@@ -397,6 +412,8 @@ def load_vllm_generator(
         max_model_len=int(max_model_len),
         max_num_seqs=int(max_num_seqs),
         enable_prefix_caching=bool(enable_prefix_caching),
+        enable_chunked_prefill=bool(enable_chunked_prefill),
+        enforce_eager=bool(enforce_eager),
     )
     tokenizer = engine.get_tokenizer()
 
@@ -459,6 +476,8 @@ def load_vllm_generator(
     generate.attn_implementation = os.environ.get("VLLM_ATTENTION_BACKEND", "vllm-auto").lower()
     generate.cache_implementation = "paged"
     generate.prefix_caching = bool(enable_prefix_caching)
+    generate.chunked_prefill = bool(enable_chunked_prefill)
+    generate.enforce_eager = bool(enforce_eager)
     return generate
 
 
@@ -484,7 +503,15 @@ def _load_configured_generator(model_path, config):
             max_num_seqs=int(os.environ.get(
                 "VLLM_MAX_NUM_SEQS", config.get("vllm_max_num_seqs", 64)
             )),
-            enable_prefix_caching=bool(config.get("vllm_enable_prefix_caching", True)),
+            enable_prefix_caching=_environment_bool(
+                "VLLM_ENABLE_PREFIX_CACHING", config.get("vllm_enable_prefix_caching", False)
+            ),
+            enable_chunked_prefill=_environment_bool(
+                "VLLM_ENABLE_CHUNKED_PREFILL", config.get("vllm_enable_chunked_prefill", False)
+            ),
+            enforce_eager=_environment_bool(
+                "VLLM_ENFORCE_EAGER", config.get("vllm_enforce_eager", False)
+            ),
         )
     raise ValueError(f"unsupported_backend:{backend}")
 
@@ -599,6 +626,8 @@ def run_semantic_extraction(
         "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
         "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
         "prefix_caching": bool(getattr(generator, "prefix_caching", False)),
+        "chunked_prefill": bool(getattr(generator, "chunked_prefill", False)),
+        "enforce_eager": bool(getattr(generator, "enforce_eager", False)),
         **backend_memory,
     })
 
@@ -710,6 +739,8 @@ def run_semantic_extraction(
         "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
         "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
         "prefix_caching": bool(getattr(generator, "prefix_caching", False)),
+        "chunked_prefill": bool(getattr(generator, "chunked_prefill", False)),
+        "enforce_eager": bool(getattr(generator, "enforce_eager", False)),
         "config_hash": _config_hash(config),
         "orders_input": len(orders),
         "orders_processed": len(pending),
