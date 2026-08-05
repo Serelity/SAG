@@ -18,7 +18,7 @@ try {
   Remove-Item -LiteralPath (Join-Path $StagingDir "tests\fixtures") -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path (Join-Path $StagingDir "docs") | Out-Null
   Copy-Item -LiteralPath (Join-Path $ProjectRoot "docs\13-Qwen4B工单级语义抽取.md") -Destination (Join-Path $StagingDir "docs") -Force
-  foreach ($Name in @("requirements.sag.txt", "requirements.entity.txt")) {
+  foreach ($Name in @("requirements.sag.txt", "requirements.entity.txt", "requirements.vllm.txt")) {
     Copy-Item -LiteralPath (Join-Path $ProjectRoot $Name) -Destination $StagingDir -Force
   }
 

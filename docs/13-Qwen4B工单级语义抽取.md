@@ -15,7 +15,24 @@ pip install -r requirements.sag.txt
 pip install -r requirements.entity.txt
 ```
 
-PyTorch 必须按服务器 CUDA 环境单独安装，不在 requirements 中固定。模型目录默认：
+PyTorch 必须按服务器 CUDA 环境单独安装，不在基础 requirements 中固定。默认 Transformers 后端继续使用现有 `ragflow-embed` 环境。可选 vLLM 后端不要直接污染该环境，应先克隆：
+
+```bash
+conda create -n sag-vllm --clone ragflow-embed -y
+conda activate sag-vllm
+python -m pip install -r requirements.vllm.txt
+python - <<'PY'
+import torch, vllm
+print({
+    "torch": torch.__version__, "vllm": vllm.__version__,
+    "cuda": torch.version.cuda, "available": torch.cuda.is_available(),
+    "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "none",
+    "capability": torch.cuda.get_device_capability(0) if torch.cuda.is_available() else None,
+})
+PY
+```
+
+安装失败时删除 `sag-vllm` 环境即可，不影响 Transformers 回退。V100 路径会在导入 vLLM 前默认设置 `VLLM_USE_V1=0` 和 `VLLM_ATTENTION_BACKEND=XFORMERS`；用户显式设置的环境变量优先。模型目录默认：
 
 ```text
 models/Qwen3-4B
@@ -88,7 +105,26 @@ batch 1 仅用于早期调试，不满足生产吞吐。smoke 正确性和显存
 LIMIT=32 BATCH_SIZES="4 8 16" bash scripts/benchmark_semantic_batches.sh
 ```
 
-脚本为每个 batch size 启动独立进程，避免前一轮 CUDA cache 干扰后一轮；比较 `orders_per_second`、`output_tokens_per_second`、reject/repair 和 GPU 峰值，以质量不下降条件下吞吐最高者作为 995 配置。Transformers 路径使用 SDPA 和 KV cache，批次间默认不调用 `empty_cache()`，以复用 allocator；应依据 current allocated 判断真实张量是否增长，reserved 增长本身不等于泄漏。若 batch 16 后仍无法满足 100k 时限，再增加 vLLM continuous batching/prefix caching backend，而不是牺牲 schema、evidence 验证或工单级一次主请求约束。不要复用旧 checkpoint。995 样本质量通过后运行：
+脚本为每个 batch size 启动独立进程，避免前一轮 CUDA cache 干扰后一轮；比较 `orders_per_second`、`output_tokens_per_second`、reject/repair 和 GPU 峰值，以质量不下降条件下吞吐最高者作为 995 配置。Transformers 路径使用 SDPA 和 KV cache，批次间默认不调用 `empty_cache()`，以复用 allocator；应依据 current allocated 判断真实张量是否增长，reserved 增长本身不等于泄漏。
+
+batch 8 的 32 条实测为 32/32 records、0 reject、1 repair、0 truncation、`0.1895 orders/s`、峰值 allocated/reserved `10.387/12.572GB`。相对 batch 1 提升约 2.9 倍，但 100k 仍约需 6.1 天，因此不能作为最终生产配置。先用剩余显存测试 Transformers 16/32：
+
+```bash
+BACKEND=transformers LIMIT=32 BATCH_SIZES="16 32" \
+  bash scripts/benchmark_semantic_batches.sh
+```
+
+随后在隔离的 `sag-vllm` 环境测试 offline continuous batching、paged KV cache 和 prefix caching。vLLM 的 batch size 是一次提交给调度器的工单数；由于输出长度差异很大，建议先测 32，再用 50 条 smoke 测 50，995 阶段再测 64：
+
+```bash
+conda activate sag-vllm
+BACKEND=vllm LIMIT=32 BATCH_SIZES="32" \
+  bash scripts/benchmark_semantic_batches.sh
+BACKEND=vllm LIMIT=50 BATCH_SIZES="50" \
+  bash scripts/benchmark_semantic_batches.sh
+```
+
+默认 vLLM 配置为 FP16、`gpu_memory_utilization=0.85`、`max_model_len=4096`、`max_num_seqs=64` 和 prefix caching。发生 OOM 时先设置 `VLLM_GPU_MEMORY_UTILIZATION=0.75` 或降低 batch；启动时提示上下文不足才增加 `VLLM_MAX_MODEL_LEN`，不要盲目增大。后端只改变推理执行，不改变 Prompt、schema、validator 和投影；checkpoint 身份仍为 `(doc_id, content_hash, prompt_version, model_id)`。benchmark/smoke 必须使用全新目录，不设置 `RESUME=1`。995 样本质量通过后运行：
 
 ```bash
 LIMIT=100000 bash scripts/extract_semantics_qwen3_4b.sh
@@ -109,7 +145,7 @@ DOC_ID_FILE=retry_doc_ids.txt RETRY_REJECTED=1 LIMIT=100000 \
   bash scripts/extract_semantics_qwen3_4b.sh
 ```
 
-checkpoint 身份为 `(doc_id, content_hash, prompt_version, model_id)`。正文变化或 Prompt/模型变化不会被旧 checkpoint 错误跳过。
+checkpoint 身份为 `(doc_id, content_hash, prompt_version, model_id)`。正文变化或 Prompt/模型变化不会被旧 checkpoint 错误跳过。同一模型和 Prompt 在 Transformers/vLLM 间切换时结果可恢复复用；若目的是对比后端，必须使用不同的新输出目录且不设置 `RESUME=1`。
 
 ## 7. 产物
 
@@ -130,11 +166,13 @@ outputs/sag_semantic.qwen3_4b.100k.duckdb
 
 ## 8. 服务器性能记录
 
-保留但不要提交：GPU 型号、dtype、batch size、attention/cache implementation、input/output token 总量及 p50/p95、finish reason、repair/reject/OOM、elapsed seconds、orders/s、output tokens/s、GPU 利用率和 current/peak allocated/reserved。长短文本按配置分桶；短 smoke 的 orders/s 包含模型加载开销，batch benchmark 应至少运行 32 条。若 Transformers batch 16 吞吐仍不足，可增加 vLLM backend，不改变工单级 schema 和投影。
+保留但不要提交：backend、GPU 型号、dtype、batch size、attention/cache implementation、prefix caching、input/output token 总量及 p50/p95、finish reason、repair/reject/OOM、elapsed seconds、orders/s、output tokens/s、GPU 利用率和 current/peak allocated/reserved。长短文本按配置分桶；短 smoke 的 orders/s 包含模型加载开销，batch benchmark 应至少运行 32 条。Transformers 与 vLLM 必须使用相同输入、Prompt 版本和 token 上限比较，不能改变工单级 schema 和投影。
 
 ## 9. 故障恢复
 
-- OOM：降低 `batch_size`，从 checkpoint `RESUME=1`；不要删除已完成 partial。
+- Transformers OOM：降低 `batch_size`，从 checkpoint `RESUME=1`；不要删除已完成 partial。
+- vLLM 安装/启动失败：确认处于隔离 `sag-vllm` 环境并保留完整 console 日志；V100 必须使用 V0/XFormers。若仍失败，切回 `BACKEND=transformers`，不要修改原 `ragflow-embed` 环境。
+- vLLM OOM：先将 `VLLM_GPU_MEMORY_UTILIZATION` 从 0.85 降至 0.75，再降低 batch；paged KV cache 会预留显存，不能只用 PyTorch allocated 判断整卡占用。
 - 大量 `length`：先确认 diagnostics 中 primary/repair 的 `max_new_tokens` 分别为 640/768；仍有截断时再调整配置并升级 `prompt_version`，不要直接复用旧 checkpoint。
 - 大量 repair：用 `summarize_semantic_diagnostics.py` 对比 `validation_before`、候选级 sanitation 和 `validation_after`，不要默认所有工单双调用。
 - OOM 或调用异常：查看 diagnostics 最后一条是 `run_failed:model_load` 还是 `model_call_failed`，并结合 `batch_memory` 的 current/peak allocated/reserved 区分模型常驻张量、临时峰值和 PyTorch reserved cache。

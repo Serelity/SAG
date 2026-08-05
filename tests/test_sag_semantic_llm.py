@@ -1,9 +1,19 @@
 import json
+import os
+import sys
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from ragflow_style_pipeline.sag_semantic_llm import _validate_with_sanitation, parse_args, run_semantic_extraction
+from ragflow_style_pipeline.sag_semantic_llm import (
+    _load_configured_generator,
+    _validate_with_sanitation,
+    load_vllm_generator,
+    parse_args,
+    run_semantic_extraction,
+)
 
 
 class RecordingGenerator:
@@ -211,6 +221,95 @@ class TestSemanticLlm(unittest.TestCase):
         self.assertEqual(second.calls, [])
         self.assertEqual(report["orders_processed"], 0)
 
+    def test_resume_identity_is_backend_independent_for_same_model_and_prompt(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)
+            paths = [tmp/name for name in ("semantic.jsonl","rejects.jsonl","run.json","quality.json")]
+            base = {"model_id":"Qwen/Qwen3-4B","prompt_version":"sag_semantic_v5","batch_size":8,"checkpoint_every":1}
+            run_semantic_extraction(source, *paths, "unused", {**base, "backend":"transformers"}, generator=RecordingGenerator(False))
+            vllm_generator = RecordingGenerator(False)
+            report = run_semantic_extraction(
+                source, *paths, "unused", {**base, "backend":"vllm"},
+                resume=True, generator=vllm_generator,
+            )
+        self.assertEqual(vllm_generator.calls, [])
+        self.assertEqual(report["orders_processed"], 0)
+
+    def test_vllm_generator_uses_offline_batch_api_and_reports_backend(self):
+        captured = {}
+
+        class FakeCuda:
+            @staticmethod
+            def is_available(): return False
+
+        class FakeTokenizer:
+            def apply_chat_template(self, messages, **kwargs):
+                captured.setdefault("templates", []).append((messages, kwargs))
+                return "templated:" + messages[0]["content"]
+
+        class FakeChoice:
+            text = '{"event_summary":"完成"}'
+            token_ids = [1, 2, 3]
+            finish_reason = "stop"
+
+        class FakeOutput:
+            outputs = [FakeChoice()]
+            prompt_token_ids = [4, 5]
+
+        class FakeLLM:
+            def __init__(self, **kwargs): captured["engine"] = kwargs
+            def get_tokenizer(self): return FakeTokenizer()
+            def generate(self, prompts, sampling, use_tqdm):
+                captured["generate"] = (prompts, sampling.kwargs, use_tqdm)
+                return [FakeOutput() for _ in prompts]
+
+        class FakeSamplingParams:
+            def __init__(self, **kwargs): self.kwargs = kwargs
+
+        fake_torch = types.SimpleNamespace(cuda=FakeCuda())
+        fake_vllm = types.SimpleNamespace(LLM=FakeLLM, SamplingParams=FakeSamplingParams)
+        with tempfile.TemporaryDirectory() as tmpdir, patch.dict(
+            sys.modules, {"torch": fake_torch, "vllm": fake_vllm},
+        ), patch.dict(os.environ, {}, clear=False):
+            generator = load_vllm_generator(tmpdir, enable_thinking=False)
+            rows = generator(["工单一", "工单二"], max_new_tokens=640, temperature=0.0)
+        self.assertEqual(captured["engine"]["dtype"], "float16")
+        self.assertEqual(captured["engine"]["max_num_seqs"], 64)
+        self.assertTrue(captured["engine"]["enable_prefix_caching"])
+        self.assertEqual(captured["generate"][0], ["templated:工单一", "templated:工单二"])
+        self.assertEqual(captured["generate"][1], {"temperature":0.0, "max_tokens":640})
+        self.assertFalse(captured["generate"][2])
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["input_tokens"], 2)
+        self.assertEqual(rows[0]["output_tokens"], 3)
+        self.assertEqual(generator.cache_implementation, "paged")
+        self.assertTrue(generator.prefix_caching)
+
+    def test_configured_generator_routes_vllm_without_importing_it_locally(self):
+        sentinel = object()
+        config = {
+            "backend":"vllm", "enable_thinking":False,
+            "vllm_gpu_memory_utilization":0.85, "vllm_max_model_len":4096,
+            "vllm_max_num_seqs":64, "vllm_enable_prefix_caching":True,
+        }
+        environment = {
+            "VLLM_GPU_MEMORY_UTILIZATION":"0.8",
+            "VLLM_MAX_MODEL_LEN":"3072",
+            "VLLM_MAX_NUM_SEQS":"32",
+        }
+        with patch.dict(os.environ, environment), patch(
+            "ragflow_style_pipeline.sag_semantic_llm.load_vllm_generator", return_value=sentinel,
+        ) as loader:
+            result = _load_configured_generator("models/Qwen3-4B", config)
+        self.assertIs(result, sentinel)
+        loader.assert_called_once_with(
+            "models/Qwen3-4B", enable_thinking=False,
+            gpu_memory_utilization=0.8, max_model_len=3072,
+            max_num_seqs=32, enable_prefix_caching=True,
+        )
+        with self.assertRaisesRegex(ValueError, "unsupported_backend"):
+            _load_configured_generator("unused", {"backend":"unknown"})
+
     def test_cli_exposes_safe_arguments(self):
         args = parse_args(["--input","safe.multiview.jsonl","--output","outputs/a.jsonl","--rejects","outputs/r.jsonl","--run-report","outputs/run.json","--quality-report","outputs/q.json","--config","config.json","--model-path","models/Qwen3-4B"])
         self.assertTrue(args.input.endswith(".multiview.jsonl"))
@@ -219,9 +318,11 @@ class TestSemanticLlm(unittest.TestCase):
         overridden = parse_args([
             "--input","safe.multiview.jsonl","--output","outputs/a.jsonl","--rejects","outputs/r.jsonl",
             "--run-report","outputs/run.json","--quality-report","outputs/q.json","--config","config.json",
-            "--model-path","models/Qwen3-4B","--batch-size","1","--diagnostic-log","outputs/d.jsonl",
+            "--model-path","models/Qwen3-4B","--batch-size","1","--backend","vllm",
+            "--diagnostic-log","outputs/d.jsonl",
         ])
         self.assertEqual(overridden.batch_size, 1)
+        self.assertEqual(overridden.backend, "vllm")
         self.assertEqual(overridden.diagnostic_log, "outputs/d.jsonl")
 
 

@@ -11,6 +11,7 @@ QUALITY_REPORT="${QUALITY_REPORT:-outputs/work_order_semantics.quality.json}"
 DIAGNOSTIC_LOG="${DIAGNOSTIC_LOG:-${OUTPUT}.diagnostics.jsonl}"
 LIMIT="${LIMIT:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-}"
+BACKEND="${BACKEND:-}"
 
 [[ "$INPUT_JSONL" == *.jsonl ]] || { echo "INPUT_JSONL must be desensitized multiview JSONL" >&2; exit 2; }
 [[ -f "$INPUT_JSONL" ]] || { echo "Missing input: $INPUT_JSONL" >&2; exit 2; }
@@ -22,8 +23,9 @@ mkdir -p \
   "$(dirname "$DIAGNOSTIC_LOG")"
 
 df -h "$(dirname "$OUTPUT")"
-printf 'input=%s\nconfig=%s\nmodel=%s\nlimit=%s\nbatch_size=%s\ndiagnostic_log=%s\n' \
-  "$INPUT_JSONL" "$CONFIG" "$MODEL_PATH" "$LIMIT" "${BATCH_SIZE:-config-default}" "$DIAGNOSTIC_LOG"
+printf 'input=%s\nconfig=%s\nmodel=%s\nlimit=%s\nbatch_size=%s\nbackend=%s\ndiagnostic_log=%s\n' \
+  "$INPUT_JSONL" "$CONFIG" "$MODEL_PATH" "$LIMIT" "${BATCH_SIZE:-config-default}" \
+  "${BACKEND:-config-default}" "$DIAGNOSTIC_LOG"
 
 args=(
   --input "$INPUT_JSONL" --config "$CONFIG" --model-path "$MODEL_PATH"
@@ -31,6 +33,7 @@ args=(
   --quality-report "$QUALITY_REPORT" --diagnostic-log "$DIAGNOSTIC_LOG" --limit "$LIMIT"
 )
 [[ -n "$BATCH_SIZE" ]] && args+=(--batch-size "$BATCH_SIZE")
+[[ -n "$BACKEND" ]] && args+=(--backend "$BACKEND")
 [[ "${RESUME:-0}" == "1" ]] && args+=(--resume)
 [[ "${RETRY_REJECTED:-0}" == "1" ]] && args+=(--retry-rejected)
 [[ -n "${DOC_ID_FILE:-}" ]] && args+=(--doc-id-file "$DOC_ID_FILE")

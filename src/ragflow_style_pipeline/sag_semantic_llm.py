@@ -368,7 +368,125 @@ def load_transformers_generator(
     generate.memory_stats = memory_stats
     generate.attn_implementation = str(attn_implementation or "default")
     generate.cache_implementation = str(cache_implementation or "dynamic")
+    generate.prefix_caching = False
     return generate
+
+
+def load_vllm_generator(
+    model_path, enable_thinking=False, gpu_memory_utilization=0.85,
+    max_model_len=4096, max_num_seqs=64, enable_prefix_caching=True,
+):
+    """Load an offline vLLM backend with a safe V100 compatibility fallback."""
+    model_path = Path(model_path)
+    if not model_path.exists():
+        raise FileNotFoundError(f"Local model path not found: {model_path}")
+    # This deployment targets V100: force the compatible engine and attention backend
+    # before importing vLLM or initializing CUDA. Explicit environment values still win.
+    os.environ.setdefault("VLLM_USE_V1", "0")
+    os.environ.setdefault("VLLM_ATTENTION_BACKEND", "XFORMERS")
+    import torch
+    from vllm import LLM, SamplingParams
+
+    engine = LLM(
+        model=str(model_path),
+        tokenizer=str(model_path),
+        trust_remote_code=True,
+        dtype="float16",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=float(gpu_memory_utilization),
+        max_model_len=int(max_model_len),
+        max_num_seqs=int(max_num_seqs),
+        enable_prefix_caching=bool(enable_prefix_caching),
+    )
+    tokenizer = engine.get_tokenizer()
+
+    def generate(prompts, max_new_tokens=512, temperature=0.0):
+        input_texts = []
+        for prompt in prompts:
+            messages = [{"role": "user", "content": prompt}]
+            try:
+                input_texts.append(tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                    enable_thinking=bool(enable_thinking),
+                ))
+            except TypeError:
+                input_texts.append(tokenizer.apply_chat_template(
+                    messages, tokenize=False, add_generation_prompt=True,
+                ))
+        sampling = SamplingParams(
+            temperature=float(temperature),
+            max_tokens=int(max_new_tokens),
+        )
+        started = time.perf_counter()
+        outputs = engine.generate(input_texts, sampling, use_tqdm=False)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        rows = []
+        for output in outputs:
+            choice = output.outputs[0]
+            output_tokens = len(choice.token_ids)
+            finish_reason = str(choice.finish_reason or (
+                "length" if output_tokens >= int(max_new_tokens) else "stop"
+            ))
+            rows.append({
+                "text": choice.text,
+                "input_tokens": len(output.prompt_token_ids or []),
+                "output_tokens": output_tokens,
+                "finish_reason": finish_reason,
+                "latency_ms": round(elapsed_ms / max(1, len(outputs)), 3),
+            })
+        return rows
+
+    def empty_cache():
+        # vLLM owns a paged KV-cache pool; emptying the PyTorch allocator here hurts throughput.
+        return None
+
+    def memory_stats():
+        if not torch.cuda.is_available():
+            return {
+                "current_allocated_gb": 0.0, "current_reserved_gb": 0.0,
+                "peak_allocated_gb": 0.0, "peak_reserved_gb": 0.0,
+            }
+        scale = 1024 ** 3
+        return {
+            "current_allocated_gb": round(torch.cuda.memory_allocated() / scale, 3),
+            "current_reserved_gb": round(torch.cuda.memory_reserved() / scale, 3),
+            "peak_allocated_gb": round(torch.cuda.max_memory_allocated() / scale, 3),
+            "peak_reserved_gb": round(torch.cuda.max_memory_reserved() / scale, 3),
+        }
+
+    generate.empty_cache = empty_cache
+    generate.memory_stats = memory_stats
+    generate.attn_implementation = os.environ.get("VLLM_ATTENTION_BACKEND", "vllm-auto").lower()
+    generate.cache_implementation = "paged"
+    generate.prefix_caching = bool(enable_prefix_caching)
+    return generate
+
+
+def _load_configured_generator(model_path, config):
+    backend = str(config.get("backend", "transformers")).strip().lower()
+    if backend == "transformers":
+        return load_transformers_generator(
+            model_path,
+            enable_thinking=bool(config.get("enable_thinking", False)),
+            attn_implementation=str(config.get("attn_implementation", "sdpa")),
+            cache_implementation=str(config.get("cache_implementation", "dynamic")),
+        )
+    if backend == "vllm":
+        return load_vllm_generator(
+            model_path,
+            enable_thinking=bool(config.get("enable_thinking", False)),
+            gpu_memory_utilization=float(os.environ.get(
+                "VLLM_GPU_MEMORY_UTILIZATION", config.get("vllm_gpu_memory_utilization", 0.85)
+            )),
+            max_model_len=int(os.environ.get(
+                "VLLM_MAX_MODEL_LEN", config.get("vllm_max_model_len", 4096)
+            )),
+            max_num_seqs=int(os.environ.get(
+                "VLLM_MAX_NUM_SEQS", config.get("vllm_max_num_seqs", 64)
+            )),
+            enable_prefix_caching=bool(config.get("vllm_enable_prefix_caching", True)),
+        )
+    raise ValueError(f"unsupported_backend:{backend}")
 
 
 def _quality_report(records, rejects):
@@ -408,6 +526,7 @@ def run_semantic_extraction(
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
     prompt_version = str(config.get("prompt_version", "sag_semantic_v5"))
+    backend = str(config.get("backend", "transformers")).strip().lower()
     output_path = Path(output_path)
     rejects_path = Path(rejects_path)
     partial_path = Path(str(output_path) + ".partial.jsonl")
@@ -462,16 +581,11 @@ def run_semantic_extraction(
         "orders_input": len(orders), "orders_pending": len(pending), "batch_size": batch_size,
         "max_new_tokens": int(config.get("max_new_tokens", 512)),
         "repair_max_new_tokens": int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))),
-        "prompt_version": prompt_version, "model": model_id,
+        "prompt_version": prompt_version, "model": model_id, "backend": backend,
     })
     if generator is None:
         try:
-            generator = load_transformers_generator(
-                model_path,
-                enable_thinking=bool(config.get("enable_thinking", False)),
-                attn_implementation=str(config.get("attn_implementation", "sdpa")),
-                cache_implementation=str(config.get("cache_implementation", "dynamic")),
-            )
+            generator = _load_configured_generator(model_path, config)
         except Exception as error:
             _append_diagnostic(diagnostic_path, {
                 "event": "run_failed", "ts": _utc_now(), "stage": "model_load",
@@ -484,6 +598,7 @@ def run_semantic_extraction(
         "event": "backend_ready", "ts": _utc_now(),
         "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
         "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
+        "prefix_caching": bool(getattr(generator, "prefix_caching", False)),
         **backend_memory,
     })
 
@@ -589,11 +704,12 @@ def run_semantic_extraction(
     }
     run_report = {
         "model": model_id,
-        "backend": str(config.get("backend", "transformers")),
+        "backend": backend,
         "dtype": os.environ.get("SEMANTIC_LLM_DTYPE", "auto"),
         "batch_size": batch_size,
         "attn_implementation": str(getattr(generator, "attn_implementation", config.get("attn_implementation", "unknown"))),
         "cache_implementation": str(getattr(generator, "cache_implementation", config.get("cache_implementation", "unknown"))),
+        "prefix_caching": bool(getattr(generator, "prefix_caching", False)),
         "config_hash": _config_hash(config),
         "orders_input": len(orders),
         "orders_processed": len(pending),
@@ -648,6 +764,7 @@ def parse_args(argv=None):
     parser.add_argument("--model-path", required=True)
     parser.add_argument("--limit", type=int)
     parser.add_argument("--batch-size", type=int)
+    parser.add_argument("--backend", choices=("transformers", "vllm"))
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-rejected", action="store_true")
     parser.add_argument("--doc-id-file")
@@ -665,6 +782,8 @@ def main(argv=None):
         if args.batch_size < 1:
             raise SystemExit("--batch-size must be at least 1")
         config["batch_size"] = args.batch_size
+    if args.backend is not None:
+        config["backend"] = args.backend
     doc_ids = None
     if args.doc_id_file:
         doc_ids = [line.strip() for line in Path(args.doc_id_file).read_text(encoding="utf-8").splitlines() if line.strip()]

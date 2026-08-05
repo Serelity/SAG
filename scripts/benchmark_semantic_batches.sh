@@ -6,14 +6,16 @@ CONFIG="${CONFIG:-configs/sag_semantic_extraction_qwen3_4b.json}"
 MODEL_PATH="${MODEL_PATH:-models/Qwen3-4B}"
 LIMIT="${LIMIT:-32}"
 BATCH_SIZES="${BATCH_SIZES:-4 8 16}"
-BENCH_ROOT="${BENCH_ROOT:-outputs/semantic-benchmark-$(date +%Y%m%d-%H%M%S)}"
+BACKEND="${BACKEND:-transformers}"
+BENCH_ROOT="${BENCH_ROOT:-outputs/semantic-benchmark-${BACKEND}-$(date +%Y%m%d-%H%M%S)}"
 
 [[ -f "$INPUT_JSONL" ]] || { echo "Missing input: $INPUT_JSONL" >&2; exit 2; }
 [[ -f "$CONFIG" ]] || { echo "Missing config: $CONFIG" >&2; exit 2; }
 [[ -d "$MODEL_PATH" ]] || { echo "Missing model: $MODEL_PATH" >&2; exit 2; }
 mkdir -p "$BENCH_ROOT"
 
-printf 'benchmark_root=%s\nlimit=%s\nbatch_sizes=%s\n' "$BENCH_ROOT" "$LIMIT" "$BATCH_SIZES"
+printf 'benchmark_root=%s\nlimit=%s\nbatch_sizes=%s\nbackend=%s\n' \
+  "$BENCH_ROOT" "$LIMIT" "$BATCH_SIZES" "$BACKEND"
 
 for batch_size in $BATCH_SIZES; do
   run_dir="$BENCH_ROOT/batch-$batch_size"
@@ -22,7 +24,7 @@ for batch_size in $BATCH_SIZES; do
   set +e
   SEMANTIC_LLM_DTYPE="${SEMANTIC_LLM_DTYPE:-float16}" \
   INPUT_JSONL="$INPUT_JSONL" CONFIG="$CONFIG" MODEL_PATH="$MODEL_PATH" \
-  BATCH_SIZE="$batch_size" LIMIT="$LIMIT" \
+  BATCH_SIZE="$batch_size" BACKEND="$BACKEND" LIMIT="$LIMIT" \
   OUTPUT="$run_dir/semantic.jsonl" REJECTS="$run_dir/rejects.jsonl" \
   RUN_REPORT="$run_dir/run.json" QUALITY_REPORT="$run_dir/quality.json" \
   DIAGNOSTIC_LOG="$run_dir/diagnostics.jsonl" \
@@ -46,10 +48,10 @@ import json
 import sys
 report = json.load(open(sys.argv[1], encoding="utf-8"))
 keys = (
-    "batch_size", "records_written", "rejects_written", "repair_requests",
+    "backend", "batch_size", "records_written", "rejects_written", "repair_requests",
     "truncation_count", "elapsed_seconds", "orders_per_second",
     "output_tokens_per_second", "gpu_peak_allocated_gb", "gpu_peak_reserved_gb",
-    "attn_implementation", "cache_implementation",
+    "attn_implementation", "cache_implementation", "prefix_caching",
 )
 print(json.dumps({key: report.get(key) for key in keys}, ensure_ascii=False))
 PY
