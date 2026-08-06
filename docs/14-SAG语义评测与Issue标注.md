@@ -216,32 +216,74 @@ mention F1 为 1 并不表示 SAG 正确；平铺 order event 仍可能产生大
 
 ## 7. Oracle flat 与 issue-aware 投影
 
+`project_gold_issues.py` 可导出便于人工审查的私有 JSONL。正式检索实验使用隔离的本地 Oracle DuckDB：
+
 ```bash
-PYTHONPATH=src python scripts/project_gold_issues.py \
+PYTHONPATH=src python scripts/build_oracle_sag.py \
   --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
   --mode flat \
-  --order-events "$PRIVATE_ROOT/audit/oracle-flat.orders.private.jsonl" \
-  --issue-events "$PRIVATE_ROOT/audit/oracle-flat.issues.private.jsonl" \
-  --member-links "$PRIVATE_ROOT/audit/oracle-flat.links.private.jsonl"
+  --db "$PRIVATE_ROOT/audit/oracle-flat.duckdb" \
+  --report "$PRIVATE_ROOT/audit/oracle-flat.build.safe.json"
 
-PYTHONPATH=src python scripts/project_gold_issues.py \
+PYTHONPATH=src python scripts/build_oracle_sag.py \
   --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
   --mode issue-aware \
-  --order-events "$PRIVATE_ROOT/audit/oracle-issue.orders.private.jsonl" \
-  --issue-events "$PRIVATE_ROOT/audit/oracle-issue.issues.private.jsonl" \
-  --member-links "$PRIVATE_ROOT/audit/oracle-issue.links.private.jsonl"
+  --db "$PRIVATE_ROOT/audit/oracle-issue.duckdb" \
+  --report "$PRIVATE_ROOT/audit/oracle-issue.build.safe.json"
 ```
 
-下一阶段将两套投影加载到隔离 DuckDB，使用同一人工查询集比较：
+Oracle flat 将同一工单的全部 gold issue 合并成一个 event；issue-aware 每个 issue 一个 event。两者使用相同 mention，只改变共边关系。question/request 的 predicate/action 可以作为 seed 属性成员，但 `issue_predicate`、`request_action` 和 discourse 不能成为 expansion frontier。
 
-- Recall@10、Precision@10、nDCG@10、MRR；
-- seed event recall；
-- one-hop expansion precision；
-- cross-issue contamination；
-- hub inflation；
-- SQL 时延和查询 trace。
+### 7.1 私有查询 relevance 集
 
-只有 gold issue-aware 投影先证明能改善 SAG 检索，才值得让 Qwen 输出 issue schema。
+查询文件是本地私有 JSONL，最小结构：
+
+```json
+{
+  "schema": "sag_oracle_query_relevance_v1",
+  "private": true,
+  "query_id": "local-query-id",
+  "seed_entities": [
+    {"entity_type": "problem_object", "values": ["路灯"]},
+    {"entity_type": "problem_behavior", "values": ["不亮"]}
+  ],
+  "seed_group_operator": "AND",
+  "expansion": {
+    "enabled": true,
+    "frontier_entity_types": ["road", "intersection", "poi"],
+    "max_expanded_docs": 2000
+  },
+  "relevance": [
+    {"doc_id": "private-doc-id", "grade": 3}
+  ]
+}
+```
+
+`grade` 为 1–3。Oracle gold 是封闭小语料；每个查询必须审阅全集或可证明召回充分的 pooling 结果，列全所有正相关工单。未列出的工单会被当作不相关，因此不完整 relevance 会虚增错误扩展率。查询应来自真实 12345 检索任务，不应为了证明 issue-aware 而刻意构造无人会发出的词组。
+
+### 7.2 本地对照评估
+
+```bash
+PYTHONPATH=src python scripts/evaluate_oracle_sag.py \
+  --flat-db "$PRIVATE_ROOT/audit/oracle-flat.duckdb" \
+  --issue-db "$PRIVATE_ROOT/audit/oracle-issue.duckdb" \
+  --queries "$PRIVATE_ROOT/audit/oracle.queries.private.jsonl" \
+  --output "$PRIVATE_ROOT/audit/oracle.retrieval.safe.json" \
+  --traces "$PRIVATE_ROOT/audit/oracle.retrieval.traces.private.jsonl" \
+  --cutoffs 5,10
+```
+
+seed 的 `AND` 必须在同一 event 内满足；一跳 expansion 只使用命中 event 自身的 frontier，最后按工单聚合排名。报告包含：
+
+- macro Precision@K、Recall@K、nDCG@K、MRR；
+- seed recall、false seed rate；
+- one-hop precision、错误扩展率；
+- issue-aware 移除/丢失的 relevant/irrelevant seed、expansion 和结果数；
+- event 成员数、每工单 event 数、实体→event/doc 度，用于观察 hub inflation。
+
+Precision@K 固定以 K 为分母；结果不足 K 时空位视为未命中。无 expansion 的查询不参与 one-hop precision/error-rate 宏平均。safe report 不含 query_id、doc_id、正文或 evidence；`traces.private.jsonl` 包含这些信息，只能留在本地私有目录。
+
+只有 gold issue-aware 投影先证明能改善 SAG 检索，且不会丢失有价值相关结果，才值得让 Qwen 输出 issue schema。
 
 ## 8. 实验顺序
 

@@ -693,7 +693,9 @@ def validate_gold_annotations(path, require_complete=False, expected_annotator="
     status_counts = Counter()
     annotators = set()
     identities = set()
+    doc_ids = set()
     duplicate_identities = 0
+    duplicate_doc_ids = 0
     completed_records = 0
     valid_records = 0
     for row in rows:
@@ -704,11 +706,16 @@ def validate_gold_annotations(path, require_complete=False, expected_annotator="
         if annotator:
             annotators.add(annotator)
         completed_records += status in _COMPLETE_ANNOTATION_STATUSES
-        identity = (_text(row.get("doc_id")), _text(row.get("content_hash")))
+        doc_id = _text(row.get("doc_id"))
+        identity = (doc_id, _text(row.get("content_hash")))
         duplicate = identity in identities
+        duplicate_doc_id = doc_id in doc_ids
         if duplicate:
             duplicate_identities += 1
+        if duplicate_doc_id:
+            duplicate_doc_ids += 1
         identities.add(identity)
+        doc_ids.add(doc_id)
         errors, warnings = _validate_gold_row(
             row,
             require_complete=require_complete,
@@ -716,6 +723,8 @@ def validate_gold_annotations(path, require_complete=False, expected_annotator="
         )
         if duplicate:
             errors.append("duplicate_record_identity")
+        if duplicate_doc_id:
+            errors.append("duplicate_doc_id")
         if errors:
             error_records += 1
             error_counts.update(errors)
@@ -745,6 +754,8 @@ def validate_gold_annotations(path, require_complete=False, expected_annotator="
         "parsed_records": len(rows),
         "unique_identities": len(identities),
         "duplicate_identities": duplicate_identities,
+        "unique_doc_ids": len(doc_ids),
+        "duplicate_doc_ids": duplicate_doc_ids,
         "completed_records": completed_records,
         "valid_records": valid_records,
         "error_records": error_records,

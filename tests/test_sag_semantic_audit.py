@@ -267,6 +267,24 @@ class TestSemanticAudit(unittest.TestCase):
         self.assertNotIn("annotation-secret", serialized)
         self.assertNotIn("不存在的证据", serialized)
 
+    def test_gold_validation_rejects_same_doc_id_with_different_hash(self):
+        first = self._completed_annotation()
+        second = self._completed_annotation()
+        first["manifest_provenance"]["records"] = 2
+        second["manifest_provenance"]["records"] = 2
+        second["content_hash"] = "sha256:different"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "duplicate-doc.private.jsonl"
+            path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in (first, second)),
+                encoding="utf-8",
+            )
+            report = validate_gold_annotations(path, require_complete=True)
+        self.assertEqual(report["duplicate_identities"], 0)
+        self.assertEqual(report["duplicate_doc_ids"], 1)
+        self.assertEqual(report["error_counts"]["duplicate_doc_id"], 1)
+        self.assertTrue(report["errors_present"])
+
     def test_gold_validation_detects_missing_manifest_record(self):
         row = self._completed_annotation()
         row["manifest_provenance"]["records"] = 2
