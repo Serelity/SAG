@@ -11,7 +11,7 @@
 - `semantic.eval.safe.json`：mention、关系和超边指标；
 - checker、run report、quality report、diagnostics summary。
 
-以下均为服务器私有产物，含脱敏正文、evidence、候选或人工 gold，不得提交、打包、粘贴到聊天或通过公开渠道传输：
+以下均为本地私有产物，含脱敏正文、evidence、候选或人工 gold，不得提交、打包、粘贴到聊天或通过公开渠道传输。服务器只在 Qwen 推理时临时生成 semantic/reject 和同事务 candidate/decision ledger，随后通过私有通道取回本地审计：
 
 - `*.private.jsonl`；
 - candidate ledger；
@@ -25,12 +25,18 @@
 
 ## 2. 真实 multiview 画像
 
-在服务器当前 99,133 条脱敏 multiview 上运行：
+除 Qwen 推理外，画像、抽样、标注、验证、重放、Oracle 投影和 SAG 评估都在本地完成。真实 TSV 应优先在本地脱敏导出；如果当前版脱敏 multiview 只存在服务器，则通过私有通道复制到仓库外的本地私有目录。不要把旧版本地代理画像表述为当前生产画像。
+
+本地运行示例：
 
 ```bash
+PRIVATE_ROOT=/path/outside/repository/sag-private/current-v1
+INPUT_JSONL="$PRIVATE_ROOT/t_order_master.100k.multiview.jsonl"
+mkdir -p "$PRIVATE_ROOT/audit"
+
 PYTHONPATH=src python scripts/profile_semantic_input.py \
-  --input data/t_order_master.100k.multiview.jsonl \
-  --output outputs/audit/input.profile.safe.json \
+  --input "$INPUT_JSONL" \
+  --output "$PRIVATE_ROOT/audit/input.profile.safe.json" \
   --max-input-chars 2200 \
   --head-size 32
 ```
@@ -53,16 +59,16 @@ PYTHONPATH=src python scripts/profile_semantic_input.py \
 
 ```bash
 PYTHONPATH=src python scripts/build_semantic_eval_manifest.py \
-  --input data/t_order_master.100k.multiview.jsonl \
-  --semantic outputs/work_order_semantics.qwen3_4b.jsonl \
-  --manifest outputs/audit/eval.manifest.jsonl \
-  --report outputs/audit/eval.manifest.report.safe.json \
+  --input "$INPUT_JSONL" \
+  --semantic "$PRIVATE_ROOT/model/v7.semantic.private.jsonl" \
+  --manifest "$PRIVATE_ROOT/audit/eval.manifest.private.jsonl" \
+  --report "$PRIVATE_ROOT/audit/eval.manifest.report.safe.json" \
   --production-size 24 \
   --challenge-size 24 \
   --seed sag-eval-pilot-v1
 ```
 
-manifest 不含正文，但含 `doc_id/content_hash`，只用于服务器受控联接。生产集按 `service_object_type + 正文长度桶` 比例抽取；挑战集轮询覆盖空间、历史/当前、否定/失败、直接 discourse、repair 和 semantic gap 等高召回代理桶。
+manifest 不含正文，但含 `doc_id/content_hash`，只用于本地受控联接。生产集按 `service_object_type + 正文长度桶` 比例抽取；挑战集轮询覆盖空间、历史/当前、否定/失败、直接 discourse、repair 和 semantic gap 等高召回代理桶。没有本地 semantic 输出时可省略 `--semantic`，但此时 challenge 不包含 repair/semantic-gap 分层。
 
 相同 seed 和输入产生相同 manifest；修改 gold 前应冻结 seed、输入 hash 和 manifest hash。
 
@@ -70,9 +76,9 @@ manifest 不含正文，但含 `doc_id/content_hash`，只用于服务器受控�
 
 ```bash
 PYTHONPATH=src python scripts/build_private_annotation_packet.py \
-  --input data/t_order_master.100k.multiview.jsonl \
-  --manifest outputs/audit/eval.manifest.jsonl \
-  --output outputs/audit/eval.annotation.private.jsonl
+  --input "$INPUT_JSONL" \
+  --manifest "$PRIVATE_ROOT/audit/eval.manifest.private.jsonl" \
+  --output "$PRIVATE_ROOT/audit/eval.annotation.private.jsonl"
 ```
 
 脚本只在终端打印数量和文件 hash，不打印正文。每条记录包含 clean fields、metadata 和空标注骨架。
@@ -100,7 +106,7 @@ PYTHONPATH=src python scripts/build_private_annotation_packet.py \
 }
 ```
 
-第一轮不强制标全局 canonical；surface、evidence、issue 关系和 current/history 是事实权威。
+第一轮不强制标全局 canonical；surface、evidence、issue 关系和 current/history 是事实权威。每个非空 evidence 必须显式给出 `field`，且 evidence 必须逐字存在于该 clean field；surface 必须逐字包含在 evidence 中。
 
 ### 4.2 标注边界
 
@@ -115,11 +121,37 @@ PYTHONPATH=src python scripts/build_private_annotation_packet.py \
 - urgency 只按当前风险或明确催办证据标注；
 - 不因 metadata 类型强行修改正文事实；metadata 的 `service_object_type` 单独保留为 registered request type。
 
-先由两名标注者独立标 30–50 条，仲裁后修订指南。若 issue 边界无法稳定一致，应简化 schema，而不是直接交给模型。
+先由两名标注者在本地复制出的 A/B 文件中独立标 30–50 条，仲裁后修订指南。若 issue 边界无法稳定一致，应简化 schema，而不是直接交给模型。
+
+### 4.3 本地验证、双标一致性与仲裁
+
+完成一份标注后先做严格验证。safe report 不含正文、evidence、doc_id 或标注者姓名：
+
+```bash
+PYTHONPATH=src python scripts/validate_semantic_gold.py \
+  --input "$PRIVATE_ROOT/audit/eval.annotator-a.private.jsonl" \
+  --output "$PRIVATE_ROOT/audit/eval.annotator-a.validation.safe.json" \
+  --require-complete \
+  --annotator annotator-a
+```
+
+两份标注必须具有完全相同的 `(doc_id, content_hash)` 集合且标注者不同。比较 grounded mention、issue attachment、完整 issue frame 和 discourse；冲突包含脱敏正文及双方标注，只能保存在本地私有目录：
+
+```bash
+PYTHONPATH=src python scripts/compare_semantic_annotations.py \
+  --left "$PRIVATE_ROOT/audit/eval.annotator-a.private.jsonl" \
+  --right "$PRIVATE_ROOT/audit/eval.annotator-b.private.jsonl" \
+  --left-annotator annotator-a \
+  --right-annotator annotator-b \
+  --output "$PRIVATE_ROOT/audit/eval.agreement.safe.json" \
+  --conflicts "$PRIVATE_ROOT/audit/eval.conflicts.private.jsonl"
+```
+
+一致率用于发现指南歧义，不设脱离数据的固定通过阈值。先审阅 `issue_frame`、`issue_attachment` 和 history/current 冲突，再由第三人仲裁生成唯一 adjudicated gold；不得通过多数投票自动合并 evidence 或 issue 边。
 
 ## 5. 私有候选和决策账本
 
-服务器抽取可显式启用：
+服务器只在 Qwen 抽取事务内显式启用候选采集：
 
 ```bash
 CANDIDATE_LEDGER=outputs/audit/candidates.private.jsonl \
@@ -128,16 +160,16 @@ BACKEND=vllm LIMIT=32 BATCH_SIZE=32 \
   bash scripts/extract_semantics_qwen3_4b.sh
 ```
 
-candidate ledger 保存解析后、sanitation 前的结构化候选；不保存原始模型响应。decision ledger 保存 validator 前后状态、动作码和结构计数。两者是 append-only 的实际推理尝试历史，使用 `run_attempt_id + ledger_sequence` 区分崩溃恢复后的重跑；用于计算 gate 删除 precision 和修改 validator 后重放。
+candidate ledger 保存解析后、sanitation 前的结构化候选；不保存原始模型响应。decision ledger 保存 validator 前后状态、动作码和结构计数。两者是 append-only 的实际推理尝试历史，使用 `run_attempt_id + ledger_sequence` 区分崩溃恢复后的重跑；用于计算 gate 删除 precision 和修改 validator 后重放。推理结束后将 semantic、reject、ledger 和聚合报告通过私有通道复制回本地，服务器不承担后续画像、评测或 DuckDB 工作。
 
-修改 validator 后，无需重跑 Qwen，可重放候选：
+修改 validator 后，无需重跑 Qwen，在本地重放候选：
 
 ```bash
 PYTHONPATH=src python scripts/replay_semantic_candidates.py \
-  --input data/t_order_master.100k.multiview.jsonl \
-  --candidates outputs/audit/candidates.private.jsonl \
-  --output outputs/audit/replayed.private.jsonl \
-  --report outputs/audit/replayed.report.safe.json
+  --input "$INPUT_JSONL" \
+  --candidates "$PRIVATE_ROOT/model/candidates.private.jsonl" \
+  --output "$PRIVATE_ROOT/audit/replayed.private.jsonl" \
+  --report "$PRIVATE_ROOT/audit/replayed.report.safe.json"
 ```
 
 replay 输出仍含 evidence，必须保持私有；report 只含状态、动作和结构计数。
@@ -157,18 +189,18 @@ replay 输出仍含 evidence，必须保持私有；report 只含状态、动作
 
 ```bash
 PYTHONPATH=src python scripts/evaluate_semantic_gold.py \
-  --gold outputs/audit/eval.gold.private.jsonl \
-  --predictions outputs/work_order_semantics.qwen3_4b.jsonl \
-  --output outputs/audit/semantic.eval.safe.json
+  --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
+  --predictions "$PRIVATE_ROOT/model/v7.semantic.private.jsonl" \
+  --output "$PRIVATE_ROOT/audit/semantic.eval.safe.json"
 ```
 
 使用人工 gold 构造“实体全部正确但全部挂在一个 order event”的 oracle flat：
 
 ```bash
 PYTHONPATH=src python scripts/evaluate_semantic_gold.py \
-  --gold outputs/audit/eval.gold.private.jsonl \
+  --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
   --oracle-flat \
-  --output outputs/audit/oracle-flat.eval.safe.json
+  --output "$PRIVATE_ROOT/audit/oracle-flat.eval.safe.json"
 ```
 
 核心指标：
@@ -186,18 +218,18 @@ mention F1 为 1 并不表示 SAG 正确；平铺 order event 仍可能产生大
 
 ```bash
 PYTHONPATH=src python scripts/project_gold_issues.py \
-  --gold outputs/audit/eval.gold.private.jsonl \
+  --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
   --mode flat \
-  --order-events outputs/audit/oracle-flat.orders.private.jsonl \
-  --issue-events outputs/audit/oracle-flat.issues.private.jsonl \
-  --member-links outputs/audit/oracle-flat.links.private.jsonl
+  --order-events "$PRIVATE_ROOT/audit/oracle-flat.orders.private.jsonl" \
+  --issue-events "$PRIVATE_ROOT/audit/oracle-flat.issues.private.jsonl" \
+  --member-links "$PRIVATE_ROOT/audit/oracle-flat.links.private.jsonl"
 
 PYTHONPATH=src python scripts/project_gold_issues.py \
-  --gold outputs/audit/eval.gold.private.jsonl \
+  --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
   --mode issue-aware \
-  --order-events outputs/audit/oracle-issue.orders.private.jsonl \
-  --issue-events outputs/audit/oracle-issue.issues.private.jsonl \
-  --member-links outputs/audit/oracle-issue.links.private.jsonl
+  --order-events "$PRIVATE_ROOT/audit/oracle-issue.orders.private.jsonl" \
+  --issue-events "$PRIVATE_ROOT/audit/oracle-issue.issues.private.jsonl" \
+  --member-links "$PRIVATE_ROOT/audit/oracle-issue.links.private.jsonl"
 ```
 
 下一阶段将两套投影加载到隔离 DuckDB，使用同一人工查询集比较：

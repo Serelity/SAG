@@ -4,7 +4,10 @@ import argparse
 import json
 from pathlib import Path
 
-from ragflow_style_pipeline.sag_semantic_audit import evaluate_semantic_gold
+from ragflow_style_pipeline.sag_semantic_audit import (
+    evaluate_semantic_gold,
+    validate_gold_annotations,
+)
 
 
 def parse_args(argv=None):
@@ -22,6 +25,11 @@ def main(argv=None):
     args = parse_args(argv)
     if not args.oracle_flat and not args.predictions:
         raise SystemExit("--predictions is required unless --oracle-flat is set")
+    validation = validate_gold_annotations(args.gold, require_complete=True)
+    if validation["errors_present"] or not validation["ready_for_evaluation"]:
+        raise SystemExit(
+            "Gold annotations are incomplete or invalid; run validate_semantic_gold.py."
+        )
     report = evaluate_semantic_gold(
         args.gold,
         prediction_path=args.predictions or None,

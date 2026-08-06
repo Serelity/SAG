@@ -1,6 +1,7 @@
 """Build deterministic, text-free production and challenge evaluation manifests."""
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,9 @@ def main(argv=None):
         semantic_path=args.semantic or None,
     )
     _atomic_jsonl(args.manifest, manifest)
+    report["manifest_file_sha256"] = (
+        "sha256:" + hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
+    )
     _atomic_json(args.report, report)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

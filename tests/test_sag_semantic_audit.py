@@ -6,10 +6,12 @@ from pathlib import Path
 from ragflow_style_pipeline.sag_semantic_audit import (
     build_eval_manifest,
     build_private_annotation_packet,
+    compare_gold_annotations,
     evaluate_semantic_gold,
     profile_semantic_input,
     project_gold_issues,
     replay_candidate_ledger,
+    validate_gold_annotations,
 )
 from ragflow_style_pipeline.work_order_input import normalize_work_order
 
@@ -111,6 +113,8 @@ class TestSemanticAudit(unittest.TestCase):
         self.assertEqual(report["invalid_records"], 0)
         self.assertEqual(report["field_presence"]["case_content_clean"]["count"], 6)
         self.assertIn("without_time", report["inference_payload_reuse"])
+        self.assertTrue(report["source_sha256"].startswith("sha256:"))
+        self.assertEqual(len(report["source_sha256"]), 71)
         self.assertEqual(report["head_population_drift"]["head"]["records"], 2)
         self.assertNotIn("服务对象咨询许可证如何办理", serialized)
         self.assertNotIn("order_secret_1", serialized)
@@ -127,6 +131,9 @@ class TestSemanticAudit(unittest.TestCase):
             )
         self.assertEqual(first, second)
         self.assertEqual(first_report, second_report)
+        self.assertTrue(first_report["source_sha256"].startswith("sha256:"))
+        self.assertTrue(first_report["manifest_content_sha256"].startswith("sha256:"))
+        self.assertEqual(first_report["semantic_source_sha256"], "")
         self.assertEqual(len(first), 5)
         production = {
             (row["doc_id"], row["content_hash"])
@@ -162,10 +169,148 @@ class TestSemanticAudit(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "manifest_identity_mismatch"):
                 build_private_annotation_packet(source, manifest_path)
+            old_schema = dict(manifest[0], schema="sag_semantic_eval_manifest_v1")
+            manifest_path.write_text(
+                json.dumps(old_schema, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "invalid_manifest_record"):
+                build_private_annotation_packet(source, manifest_path)
         self.assertEqual(len(packet), 3)
         self.assertTrue(all(row["private"] for row in packet))
+        self.assertTrue(all(row["schema"] == "sag_issue_gold_v2" for row in packet))
+        self.assertTrue(all(row["manifest_provenance"]["records"] == 3 for row in packet))
+        self.assertEqual(len({
+            row["manifest_provenance"]["content_sha256"] for row in packet
+        }), 1)
         self.assertTrue(all(row["annotation"]["status"] == "unlabeled" for row in packet))
         self.assertTrue(all(row["clean_fields"]["case_content_clean"] for row in packet))
+
+    def _completed_annotation(self, annotator="annotator-a"):
+        return {
+            "schema": "sag_issue_gold_v2",
+            "private": True,
+            "subset": "challenge",
+            "doc_id": "annotation-secret-1",
+            "content_hash": "sha256:annotation-1",
+            "manifest_provenance": {
+                "schema": "sag_semantic_eval_manifest_v2",
+                "records": 1,
+                "content_sha256": "sha256:" + "a" * 64,
+            },
+            "clean_fields": {
+                "title_clean": "",
+                "case_content_clean": "和平路路灯不亮，服务对象对此不满意",
+                "case_goal_clean": "要求维修",
+                "address_detail_clean": "",
+            },
+            "metadata": {"service_object_type": "求助"},
+            "issues": [{
+                "mode": "problem",
+                "time_scope": "current",
+                "objects": [{
+                    "surface": "路灯", "field": "case_content_clean", "evidence": "路灯",
+                }],
+                "predicates": [{
+                    "surface": "不亮", "field": "case_content_clean", "evidence": "不亮",
+                }],
+                "actions": [{
+                    "surface": "维修", "field": "case_goal_clean", "evidence": "维修",
+                }],
+                "locations": [{
+                    "type": "road", "surface": "和平路",
+                    "field": "case_content_clean", "evidence": "和平路",
+                }],
+            }],
+            "declared_intents": [{
+                "label": "求助", "field": "case_goal_clean", "evidence": "要求维修",
+            }],
+            "direct_emotions": [{
+                "label": "不满", "intensity": 2,
+                "field": "case_content_clean", "evidence": "不满意",
+            }],
+            "satisfaction": {
+                "label": "dissatisfied", "target": "路灯问题",
+                "field": "case_content_clean", "evidence": "不满意",
+            },
+            "urgency": {"level": "normal", "evidence": ""},
+            "annotation": {
+                "annotator": annotator, "status": "completed", "notes": "",
+            },
+        }
+
+    def test_gold_validation_is_safe_and_checks_grounding(self):
+        valid = self._completed_annotation()
+        invalid = json.loads(json.dumps(valid, ensure_ascii=False))
+        invalid["doc_id"] = "annotation-secret-2"
+        invalid["content_hash"] = "sha256:annotation-2"
+        valid["manifest_provenance"]["records"] = 2
+        invalid["manifest_provenance"]["records"] = 2
+        invalid["issues"][0]["predicates"][0]["evidence"] = "不存在的证据"
+        invalid["urgency"] = {"level": "normal", "evidence": "路灯"}
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "gold.private.jsonl"
+            path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in (valid, invalid)),
+                encoding="utf-8",
+            )
+            report = validate_gold_annotations(
+                path, require_complete=True, expected_annotator="annotator-a"
+            )
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertEqual(report["records_read"], 2)
+        self.assertEqual(report["valid_records"], 1)
+        self.assertEqual(report["error_records"], 1)
+        self.assertEqual(report["error_counts"]["issue_member_evidence_not_in_field"], 1)
+        self.assertEqual(report["error_counts"]["normal_urgency_has_evidence"], 1)
+        self.assertTrue(report["errors_present"])
+        self.assertFalse(report["ready_for_agreement"])
+        self.assertNotIn("annotation-secret", serialized)
+        self.assertNotIn("不存在的证据", serialized)
+
+    def test_gold_validation_detects_missing_manifest_record(self):
+        row = self._completed_annotation()
+        row["manifest_provenance"]["records"] = 2
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "truncated.private.jsonl"
+            path.write_text(json.dumps(row, ensure_ascii=False) + "\n", encoding="utf-8")
+            report = validate_gold_annotations(path, require_complete=True)
+        self.assertEqual(
+            report["file_error_counts"]["manifest_record_count_mismatch"], 1
+        )
+        self.assertTrue(report["errors_present"])
+        self.assertFalse(report["ready_for_evaluation"])
+
+    def test_annotation_agreement_returns_safe_metrics_and_private_conflicts(self):
+        left = self._completed_annotation("annotator-a")
+        right = self._completed_annotation("annotator-b")
+        right["issues"][0]["locations"] = []
+        right["direct_emotions"] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            left_path = Path(tmpdir) / "left.private.jsonl"
+            right_path = Path(tmpdir) / "right.private.jsonl"
+            left_path.write_text(json.dumps(left, ensure_ascii=False) + "\n", encoding="utf-8")
+            right_path.write_text(json.dumps(right, ensure_ascii=False) + "\n", encoding="utf-8")
+            report, conflicts = compare_gold_annotations(
+                left_path, right_path,
+                left_annotator="annotator-a", right_annotator="annotator-b",
+            )
+            wrong = json.loads(json.dumps(right, ensure_ascii=False))
+            wrong["content_hash"] = "sha256:wrong"
+            right_path.write_text(json.dumps(wrong, ensure_ascii=False) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "annotation_identity_sets_differ"):
+                compare_gold_annotations(left_path, right_path)
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertEqual(report["shared_records"], 1)
+        self.assertEqual(report["exact_records"], 0)
+        self.assertEqual(report["conflict_records"], 1)
+        self.assertIn("grounded_mentions", report["conflict_reason_counts"])
+        self.assertIn("issue_attachment", report["conflict_reason_counts"])
+        self.assertIn("discourse", report["conflict_reason_counts"])
+        self.assertLess(report["grounded_mention_agreement"]["dice_f1"], 1.0)
+        self.assertNotIn("annotation-secret", serialized)
+        self.assertEqual(conflicts[0]["doc_id"], "annotation-secret-1")
+        self.assertTrue(conflicts[0]["private"])
+        self.assertEqual(conflicts[0]["adjudication"]["status"], "pending")
 
     def test_candidate_replay_selects_latest_attempt_without_invoking_model(self):
         order_document = {

@@ -6,7 +6,10 @@ import json
 import os
 from pathlib import Path
 
-from ragflow_style_pipeline.sag_semantic_audit import project_gold_issues
+from ragflow_style_pipeline.sag_semantic_audit import (
+    project_gold_issues,
+    validate_gold_annotations,
+)
 
 
 def _atomic_jsonl(path, rows):
@@ -39,6 +42,11 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    validation = validate_gold_annotations(args.gold, require_complete=True)
+    if validation["errors_present"] or not validation["ready_for_evaluation"]:
+        raise SystemExit(
+            "Gold annotations are incomplete or invalid; run validate_semantic_gold.py."
+        )
     orders, issues, links = project_gold_issues(args.gold, flat=args.mode == "flat")
     _atomic_jsonl(args.order_events, orders)
     _atomic_jsonl(args.issue_events, issues)

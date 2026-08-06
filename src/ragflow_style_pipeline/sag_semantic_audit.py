@@ -11,9 +11,11 @@ from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import _semantic_payload
 from ragflow_style_pipeline.sag_semantic_versions import (
+    ANNOTATION_AGREEMENT_VERSION,
     EVAL_MANIFEST_VERSION,
     EVALUATION_VERSION,
     GOLD_SCHEMA_VERSION,
+    GOLD_VALIDATION_VERSION,
     INPUT_PROFILE_VERSION,
     VALIDATOR_REPLAY_VERSION,
     VALIDATOR_VERSION,
@@ -81,6 +83,21 @@ _PROXY_PATTERNS = {
     ),
 }
 
+# Frozen with GOLD_SCHEMA_VERSION. Do not import these from the model-output
+# schema: changing the extraction contract must not silently change gold v1.
+_GOLD_INTENTS = {"投诉", "举报", "求助", "咨询", "建议", "表扬", "催办", "反馈", "其他"}
+_GOLD_EMOTIONS = {"愤怒", "不满", "焦虑", "无奈", "悲伤", "感谢", "认可"}
+_GOLD_SATISFACTION_LABELS = {"satisfied", "dissatisfied", "mixed", "unknown"}
+_GOLD_URGENCY_LEVELS = {"normal", "high", "critical"}
+_ISSUE_MODES = {
+    "problem", "question", "request", "suggestion", "praise",
+    "historical_response", "current_stance",
+}
+_TIME_SCOPES = {"current", "historical"}
+_LOCATION_TYPES = {"road", "intersection", "poi"}
+_ANNOTATION_STATUSES = {"unlabeled", "in_progress", "completed", "adjudicated"}
+_COMPLETE_ANNOTATION_STATUSES = {"completed", "adjudicated"}
+
 _LENGTH_BUCKETS = (
     ("000-099", 99),
     ("100-199", 199),
@@ -102,6 +119,14 @@ def _sha(value):
 
 def _stable_json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _file_sha256(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
 
 
 def _percentile(values, fraction):
@@ -311,6 +336,7 @@ def profile_semantic_input(path, max_input_chars=2200, head_size=32):
     return {
         "schema": INPUT_PROFILE_VERSION,
         "source_file": Path(path).name,
+        "source_sha256": _file_sha256(path),
         "records_read": records_read,
         "valid_records": valid_records,
         "invalid_records": records_read - valid_records,
@@ -357,11 +383,26 @@ def build_private_annotation_packet(input_path, manifest_path):
             if not line.strip():
                 continue
             value = json.loads(line)
-            if not isinstance(value, dict) or not value.get("doc_id"):
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != EVAL_MANIFEST_VERSION
+                or not _text(value.get("doc_id"))
+                or not _text(value.get("content_hash"))
+                or _text(value.get("subset")) not in {"production", "challenge"}
+            ):
                 raise ValueError(f"line_{line_number}:invalid_manifest_record")
             manifest.append(value)
 
+    manifest_provenance = {
+        "schema": _text(manifest[0].get("schema")) if manifest else "",
+        "records": len(manifest),
+        "content_sha256": "sha256:" + _sha("\n".join(
+            _stable_json(row) for row in manifest
+        )),
+    }
     target_ids = {str(row["doc_id"]) for row in manifest}
+    if len(target_ids) != len(manifest):
+        raise ValueError("duplicate_manifest_doc_id")
     orders = {}
     for order in iter_normalized_orders(input_path):
         if "_profile_error" in order:
@@ -383,6 +424,7 @@ def build_private_annotation_packet(input_path, manifest_path):
             "subset": row.get("subset", ""),
             "doc_id": doc_id,
             "content_hash": order.get("content_hash", ""),
+            "manifest_provenance": manifest_provenance,
             "clean_fields": {
                 field: _text(order.get(field)) for field in CLEAN_FIELDS
             },
@@ -399,6 +441,561 @@ def build_private_annotation_packet(input_path, manifest_path):
             },
         })
     return packet
+
+
+def _load_annotation_rows(path):
+    rows = []
+    parse_errors = Counter()
+    with Path(path).open("r", encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                parse_errors["invalid_json"] += 1
+                continue
+            if not isinstance(value, dict):
+                parse_errors["record_not_object"] += 1
+                continue
+            rows.append(value)
+    return rows, parse_errors
+
+
+def _evidence_field(item, clean_fields):
+    field = _text(item.get("field") or item.get("source_field"))
+    evidence = _text(item.get("evidence"))
+    if field:
+        return field
+    matches = [
+        name for name in CLEAN_FIELDS
+        if evidence and evidence in _text(clean_fields.get(name))
+    ]
+    return matches[0] if len(matches) == 1 else ""
+
+
+def _validate_evidence(item, clean_fields, errors, prefix, require_surface=False):
+    if not isinstance(item, dict):
+        errors.append(f"{prefix}_not_object")
+        return
+    evidence = _text(item.get("evidence"))
+    field = _text(item.get("field") or item.get("source_field"))
+    surface = _text(item.get("surface") or item.get("text"))
+    if require_surface and not surface:
+        errors.append(f"{prefix}_missing_surface")
+    if not evidence:
+        errors.append(f"{prefix}_missing_evidence")
+    if evidence and not field:
+        errors.append(f"{prefix}_missing_field")
+    if field and field not in CLEAN_FIELDS:
+        errors.append(f"{prefix}_invalid_field")
+        return
+    if field:
+        if evidence and evidence not in _text(clean_fields.get(field)):
+            errors.append(f"{prefix}_evidence_not_in_field")
+    elif evidence and not any(evidence in _text(clean_fields.get(name)) for name in CLEAN_FIELDS):
+        errors.append(f"{prefix}_evidence_not_in_clean_fields")
+    if require_surface and surface and evidence and surface not in evidence:
+        errors.append(f"{prefix}_surface_not_in_evidence")
+
+
+def _validate_gold_row(row, require_complete=False, expected_annotator=""):
+    errors = []
+    warnings = []
+    if row.get("schema") != GOLD_SCHEMA_VERSION:
+        errors.append("invalid_gold_schema")
+    if row.get("private") is not True:
+        errors.append("private_marker_missing")
+    if not _text(row.get("doc_id")):
+        errors.append("missing_doc_id")
+    if not _text(row.get("content_hash")):
+        errors.append("missing_content_hash")
+    if _text(row.get("subset")) not in {"production", "challenge"}:
+        errors.append("invalid_subset")
+    provenance = row.get("manifest_provenance")
+    if not isinstance(provenance, dict):
+        errors.append("manifest_provenance_not_object")
+    else:
+        if not _text(provenance.get("schema")):
+            errors.append("manifest_provenance_missing_schema")
+        records = provenance.get("records")
+        if not isinstance(records, int) or isinstance(records, bool) or records < 1:
+            errors.append("manifest_provenance_invalid_records")
+        content_sha256 = _text(provenance.get("content_sha256"))
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", content_sha256):
+            errors.append("manifest_provenance_invalid_hash")
+    clean_fields = row.get("clean_fields")
+    if not isinstance(clean_fields, dict):
+        errors.append("clean_fields_not_object")
+        clean_fields = {}
+    else:
+        for field in CLEAN_FIELDS:
+            if field not in clean_fields:
+                errors.append("clean_field_missing")
+            elif not isinstance(clean_fields.get(field), str):
+                errors.append("clean_field_not_string")
+    if not isinstance(row.get("metadata"), dict):
+        errors.append("metadata_not_object")
+    annotation = row.get("annotation")
+    if not isinstance(annotation, dict):
+        errors.append("annotation_not_object")
+        annotation = {}
+    status = _text(annotation.get("status"))
+    annotator = _text(annotation.get("annotator"))
+    if status not in _ANNOTATION_STATUSES:
+        errors.append("invalid_annotation_status")
+    if require_complete and status not in _COMPLETE_ANNOTATION_STATUSES:
+        errors.append("annotation_not_complete")
+    if status in _COMPLETE_ANNOTATION_STATUSES and not annotator:
+        errors.append("completed_annotation_missing_annotator")
+    if expected_annotator and annotator != expected_annotator:
+        errors.append("unexpected_annotator")
+
+    issues = row.get("issues")
+    if not isinstance(issues, list):
+        errors.append("issues_not_array")
+        issues = []
+    if status in _COMPLETE_ANNOTATION_STATUSES and not issues:
+        errors.append("completed_annotation_without_issue")
+    seen_issues = set()
+    for issue in issues:
+        if not isinstance(issue, dict):
+            errors.append("issue_not_object")
+            continue
+        mode = _text(issue.get("mode"))
+        time_scope = _text(issue.get("time_scope"))
+        if mode not in _ISSUE_MODES:
+            errors.append("issue_invalid_mode")
+        if time_scope not in _TIME_SCOPES:
+            errors.append("issue_invalid_time_scope")
+        if mode == "historical_response" and time_scope != "historical":
+            errors.append("historical_response_not_historical")
+        if mode == "current_stance" and time_scope != "current":
+            errors.append("current_stance_not_current")
+        issue_key = _stable_json(issue)
+        if issue_key in seen_issues:
+            errors.append("duplicate_issue")
+        seen_issues.add(issue_key)
+        member_count = 0
+        for group in ("objects", "predicates", "actions"):
+            members = issue.get(group)
+            if not isinstance(members, list):
+                errors.append(f"issue_{group}_not_array")
+                continue
+            seen_members = set()
+            for member in members:
+                _validate_evidence(member, clean_fields, errors, "issue_member", require_surface=True)
+                if isinstance(member, dict):
+                    key = (
+                        _normalized_mention(member),
+                        _text(member.get("field") or member.get("source_field")),
+                        _text(member.get("evidence")),
+                    )
+                    if key in seen_members:
+                        errors.append("duplicate_issue_member")
+                    seen_members.add(key)
+                member_count += 1
+        if mode in {"problem", "question", "historical_response", "current_stance"}:
+            predicates = issue.get("predicates")
+            if isinstance(predicates, list) and not predicates:
+                warnings.append(f"{mode}_without_predicate")
+        if mode in {"request", "suggestion"}:
+            actions = issue.get("actions")
+            if isinstance(actions, list) and not actions:
+                warnings.append(f"{mode}_without_action")
+        locations = issue.get("locations")
+        if not isinstance(locations, list):
+            errors.append("issue_locations_not_array")
+            locations = []
+        seen_locations = set()
+        for location in locations:
+            _validate_evidence(location, clean_fields, errors, "issue_location", require_surface=True)
+            if isinstance(location, dict):
+                if _text(location.get("type")) not in _LOCATION_TYPES:
+                    errors.append("issue_location_invalid_type")
+                key = (
+                    _text(location.get("type")),
+                    _normalized_mention(location),
+                    _text(location.get("field") or location.get("source_field")),
+                    _text(location.get("evidence")),
+                )
+                if key in seen_locations:
+                    errors.append("duplicate_issue_location")
+                seen_locations.add(key)
+            member_count += 1
+        if not member_count:
+            errors.append("empty_issue")
+
+    intents = row.get("declared_intents")
+    if not isinstance(intents, list):
+        errors.append("declared_intents_not_array")
+        intents = []
+    for intent in intents:
+        if not isinstance(intent, dict) or _text(intent.get("label")) not in _GOLD_INTENTS:
+            errors.append("intent_invalid_label")
+        _validate_evidence(intent, clean_fields, errors, "intent")
+
+    emotions = row.get("direct_emotions")
+    if not isinstance(emotions, list):
+        errors.append("direct_emotions_not_array")
+        emotions = []
+    for emotion in emotions:
+        if not isinstance(emotion, dict) or _text(emotion.get("label")) not in _GOLD_EMOTIONS:
+            errors.append("emotion_invalid_label")
+        intensity = emotion.get("intensity") if isinstance(emotion, dict) else None
+        if not isinstance(intensity, int) or isinstance(intensity, bool) or not 1 <= intensity <= 3:
+            errors.append("emotion_invalid_intensity")
+        _validate_evidence(emotion, clean_fields, errors, "emotion")
+
+    satisfaction = row.get("satisfaction")
+    if not isinstance(satisfaction, dict):
+        errors.append("satisfaction_not_object")
+        satisfaction = {}
+    satisfaction_label = _text(satisfaction.get("label"))
+    if satisfaction_label not in _GOLD_SATISFACTION_LABELS:
+        errors.append("satisfaction_invalid_label")
+    if satisfaction_label == "unknown":
+        if any(_text(satisfaction.get(key)) for key in (
+            "target", "evidence", "field", "source_field"
+        )):
+            errors.append("unknown_satisfaction_has_grounding")
+    elif satisfaction_label in _GOLD_SATISFACTION_LABELS:
+        if not _text(satisfaction.get("target")):
+            errors.append("satisfaction_missing_target")
+        _validate_evidence(satisfaction, clean_fields, errors, "satisfaction")
+
+    urgency = row.get("urgency")
+    if not isinstance(urgency, dict):
+        errors.append("urgency_not_object")
+        urgency = {}
+    urgency_level = _text(urgency.get("level"))
+    if urgency_level not in _GOLD_URGENCY_LEVELS:
+        errors.append("urgency_invalid_level")
+    if urgency_level == "normal":
+        if any(_text(urgency.get(key)) for key in ("evidence", "field", "source_field")):
+            errors.append("normal_urgency_has_evidence")
+    elif urgency_level in _GOLD_URGENCY_LEVELS:
+        _validate_evidence(urgency, clean_fields, errors, "urgency")
+
+    if status == "in_progress":
+        warnings.append("annotation_in_progress")
+    if status == "unlabeled":
+        warnings.append("annotation_unlabeled")
+    return errors, warnings
+
+
+def validate_gold_annotations(path, require_complete=False, expected_annotator=""):
+    """Validate private issue annotation structure without exposing identifiers or text."""
+    rows, parse_errors = _load_annotation_rows(path)
+    error_counts = Counter(parse_errors)
+    warning_counts = Counter()
+    error_records = sum(parse_errors.values())
+    status_counts = Counter()
+    annotators = set()
+    identities = set()
+    duplicate_identities = 0
+    completed_records = 0
+    valid_records = 0
+    for row in rows:
+        annotation = row.get("annotation") if isinstance(row.get("annotation"), dict) else {}
+        status = _text(annotation.get("status")) or "<INVALID>"
+        status_counts[status] += 1
+        annotator = _text(annotation.get("annotator"))
+        if annotator:
+            annotators.add(annotator)
+        completed_records += status in _COMPLETE_ANNOTATION_STATUSES
+        identity = (_text(row.get("doc_id")), _text(row.get("content_hash")))
+        duplicate = identity in identities
+        if duplicate:
+            duplicate_identities += 1
+        identities.add(identity)
+        errors, warnings = _validate_gold_row(
+            row,
+            require_complete=require_complete,
+            expected_annotator=expected_annotator,
+        )
+        if duplicate:
+            errors.append("duplicate_record_identity")
+        if errors:
+            error_records += 1
+            error_counts.update(errors)
+        else:
+            valid_records += 1
+        warning_counts.update(warnings)
+    total_records = len(rows) + sum(parse_errors.values())
+    provenance_values = {
+        _stable_json(row.get("manifest_provenance"))
+        for row in rows if isinstance(row.get("manifest_provenance"), dict)
+    }
+    file_error_counts = Counter()
+    if len(provenance_values) != 1:
+        file_error_counts["manifest_provenance_not_unique"] += 1
+    elif rows:
+        expected_records = rows[0]["manifest_provenance"].get("records")
+        if isinstance(expected_records, int) and not isinstance(expected_records, bool):
+            if expected_records != len(rows):
+                file_error_counts["manifest_record_count_mismatch"] += 1
+    errors_present = bool(error_records or file_error_counts)
+    return {
+        "schema": GOLD_VALIDATION_VERSION,
+        "gold_schema": GOLD_SCHEMA_VERSION,
+        "private_input": True,
+        "require_complete": bool(require_complete),
+        "records_read": total_records,
+        "parsed_records": len(rows),
+        "unique_identities": len(identities),
+        "duplicate_identities": duplicate_identities,
+        "completed_records": completed_records,
+        "valid_records": valid_records,
+        "error_records": error_records,
+        "status_counts": dict(status_counts),
+        "annotator_cardinality": len(annotators),
+        "error_counts": dict(error_counts),
+        "file_error_counts": dict(file_error_counts),
+        "errors_present": errors_present,
+        "warning_counts": dict(warning_counts),
+        "ready_for_evaluation": (
+            total_records > 0
+            and not errors_present
+            and completed_records == total_records
+        ),
+        "ready_for_agreement": (
+            total_records > 0
+            and not errors_present
+            and completed_records == total_records
+            and len(annotators) == 1
+        ),
+    }
+
+
+def _grounded_member(item, role, clean_fields, entity_type=""):
+    item = item if isinstance(item, dict) else {}
+    return (
+        role,
+        entity_type,
+        _normalized_mention(item),
+        _evidence_field(item, clean_fields),
+        _text(item.get("evidence")),
+    )
+
+
+def _grounded_issue_frames(row):
+    clean_fields = row.get("clean_fields") if isinstance(row.get("clean_fields"), dict) else {}
+    frames = set()
+    for issue in row.get("issues", []) if isinstance(row.get("issues"), list) else []:
+        if not isinstance(issue, dict):
+            continue
+        mode = _text(issue.get("mode"))
+        predicate_role = "problem_behavior" if mode == "problem" else "issue_predicate"
+        members = set()
+        for item in issue.get("objects", []) if isinstance(issue.get("objects"), list) else []:
+            members.add(_grounded_member(item, "problem_object", clean_fields))
+        for item in issue.get("predicates", []) if isinstance(issue.get("predicates"), list) else []:
+            members.add(_grounded_member(item, predicate_role, clean_fields))
+        for item in issue.get("actions", []) if isinstance(issue.get("actions"), list) else []:
+            members.add(_grounded_member(item, "request_action", clean_fields))
+        for item in issue.get("locations", []) if isinstance(issue.get("locations"), list) else []:
+            location_type = _text(item.get("type")) if isinstance(item, dict) else ""
+            members.add(_grounded_member(item, "location", clean_fields, location_type))
+        frames.add((frozenset(members), mode, _text(issue.get("time_scope"))))
+    return frames
+
+
+def _grounded_discourse(row):
+    clean_fields = row.get("clean_fields") if isinstance(row.get("clean_fields"), dict) else {}
+
+    def grounded(items, include_intensity=False):
+        values = set()
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            base = (
+                _text(item.get("label")),
+                _evidence_field(item, clean_fields),
+                _text(item.get("evidence")),
+            )
+            values.add(base + ((item.get("intensity"),) if include_intensity else ()))
+        return frozenset(values)
+
+    satisfaction = row.get("satisfaction") if isinstance(row.get("satisfaction"), dict) else {}
+    urgency = row.get("urgency") if isinstance(row.get("urgency"), dict) else {}
+    return {
+        "intents": grounded(row.get("declared_intents")),
+        "emotions": grounded(row.get("direct_emotions"), include_intensity=True),
+        "satisfaction": (
+            _text(satisfaction.get("label")),
+            _text(satisfaction.get("target")),
+            _evidence_field(satisfaction, clean_fields),
+            _text(satisfaction.get("evidence")),
+        ),
+        "urgency": (
+            _text(urgency.get("level")),
+            _evidence_field(urgency, clean_fields),
+            _text(urgency.get("evidence")),
+        ),
+    }
+
+
+def _agreement_counts(left, right):
+    return {
+        "matched": len(left & right),
+        "left_only": len(left - right),
+        "right_only": len(right - left),
+        "dice_f1": round(2 * len(left & right) / (len(left) + len(right)), 4)
+        if left or right else 1.0,
+    }
+
+
+def _private_conflict_row(left, right, reasons):
+    return {
+        "schema": ANNOTATION_AGREEMENT_VERSION,
+        "private": True,
+        "doc_id": left.get("doc_id", ""),
+        "content_hash": left.get("content_hash", ""),
+        "subset": left.get("subset", ""),
+        "clean_fields": left.get("clean_fields", {}),
+        "metadata": left.get("metadata", {}),
+        "conflict_reasons": sorted(reasons),
+        "left": {
+            key: left.get(key)
+            for key in (
+                "issues", "declared_intents", "direct_emotions",
+                "satisfaction", "urgency", "annotation",
+            )
+        },
+        "right": {
+            key: right.get(key)
+            for key in (
+                "issues", "declared_intents", "direct_emotions",
+                "satisfaction", "urgency", "annotation",
+            )
+        },
+        "adjudication": {
+            "status": "pending",
+            "adjudicator": "",
+            "notes": "",
+        },
+    }
+
+
+def compare_gold_annotations(left_path, right_path, left_annotator="", right_annotator=""):
+    """Compare two complete private annotation files and return safe metrics plus conflicts."""
+    left_validation = validate_gold_annotations(
+        left_path, require_complete=True, expected_annotator=left_annotator
+    )
+    right_validation = validate_gold_annotations(
+        right_path, require_complete=True, expected_annotator=right_annotator
+    )
+    if not left_validation["ready_for_agreement"]:
+        raise ValueError("left_annotations_not_ready")
+    if not right_validation["ready_for_agreement"]:
+        raise ValueError("right_annotations_not_ready")
+    left_rows, _ = _load_annotation_rows(left_path)
+    right_rows, _ = _load_annotation_rows(right_path)
+    left_index = {
+        (_text(row.get("doc_id")), _text(row.get("content_hash"))): row
+        for row in left_rows
+    }
+    right_index = {
+        (_text(row.get("doc_id")), _text(row.get("content_hash"))): row
+        for row in right_rows
+    }
+    if left_index.keys() != right_index.keys():
+        raise ValueError("annotation_identity_sets_differ")
+    left_annotators = {
+        _text(row.get("annotation", {}).get("annotator")) for row in left_rows
+    }
+    right_annotators = {
+        _text(row.get("annotation", {}).get("annotator")) for row in right_rows
+    }
+    if left_annotators == right_annotators:
+        raise ValueError("annotators_not_distinct")
+
+    shared = sorted(left_index.keys() & right_index.keys())
+    issue_counts = Counter()
+    mention_counts = Counter()
+    pair_counts = Counter()
+    discourse_exact = Counter()
+    exact_records = 0
+    reason_counts = Counter()
+    conflicts = []
+    for identity in shared:
+        left = left_index[identity]
+        right = right_index[identity]
+        if any(left.get(key) != right.get(key) for key in (
+            "subset", "manifest_provenance", "clean_fields", "metadata"
+        )):
+            raise ValueError("annotation_source_payloads_differ")
+        left_frames = _grounded_issue_frames(left)
+        right_frames = _grounded_issue_frames(right)
+        left_mentions = set().union(*(frame[0] for frame in left_frames)) if left_frames else set()
+        right_mentions = set().union(*(frame[0] for frame in right_frames)) if right_frames else set()
+        left_pairs, _ = _pairs([set(frame[0]) for frame in left_frames])
+        right_pairs, _ = _pairs([set(frame[0]) for frame in right_frames])
+        left_discourse = _grounded_discourse(left)
+        right_discourse = _grounded_discourse(right)
+        for label, values_left, values_right in (
+            ("issue", left_frames, right_frames),
+            ("mention", left_mentions, right_mentions),
+            ("pair", left_pairs, right_pairs),
+        ):
+            counts = issue_counts if label == "issue" else mention_counts if label == "mention" else pair_counts
+            counts["matched"] += len(values_left & values_right)
+            counts["left_only"] += len(values_left - values_right)
+            counts["right_only"] += len(values_right - values_left)
+        for key in ("intents", "emotions", "satisfaction", "urgency"):
+            discourse_exact[key] += left_discourse[key] == right_discourse[key]
+
+        reasons = set()
+        if left_mentions != right_mentions:
+            reasons.add("grounded_mentions")
+        if left_pairs != right_pairs:
+            reasons.add("issue_attachment")
+        if left_frames != right_frames:
+            reasons.add("issue_frame")
+        if left_discourse != right_discourse:
+            reasons.add("discourse")
+        if not reasons:
+            exact_records += 1
+        else:
+            reason_counts.update(reasons)
+            conflicts.append(_private_conflict_row(left, right, reasons))
+
+    def aggregate(counts):
+        matched = counts["matched"]
+        total = 2 * matched + counts["left_only"] + counts["right_only"]
+        return {
+            "matched": matched,
+            "left_only": counts["left_only"],
+            "right_only": counts["right_only"],
+            "dice_f1": round(2 * matched / total, 4) if total else 1.0,
+        }
+
+    shared_count = len(shared)
+    report = {
+        "schema": ANNOTATION_AGREEMENT_VERSION,
+        "gold_schema": GOLD_SCHEMA_VERSION,
+        "private_inputs": True,
+        "left_records": len(left_index),
+        "right_records": len(right_index),
+        "shared_records": shared_count,
+        "left_only_identities": len(left_index.keys() - right_index.keys()),
+        "right_only_identities": len(right_index.keys() - left_index.keys()),
+        "exact_records": exact_records,
+        "exact_record_rate": round(exact_records / shared_count, 4) if shared_count else 0.0,
+        "conflict_records": len(conflicts),
+        "conflict_reason_counts": dict(reason_counts),
+        "grounded_mention_agreement": aggregate(mention_counts),
+        "issue_attachment_agreement": aggregate(pair_counts),
+        "issue_frame_agreement": aggregate(issue_counts),
+        "discourse_exact_rates": {
+            key: round(value / shared_count, 4) if shared_count else 0.0
+            for key, value in discourse_exact.items()
+        },
+        "left_validation": left_validation,
+        "right_validation": right_validation,
+    }
+    return report, conflicts
 
 
 def _read_semantic_index(path):
@@ -533,6 +1130,11 @@ def build_eval_manifest(
     report = {
         "schema": EVAL_MANIFEST_VERSION,
         "seed": seed,
+        "source_sha256": _file_sha256(input_path),
+        "semantic_source_sha256": _file_sha256(semantic_path) if semantic_path else "",
+        "manifest_content_sha256": "sha256:" + _sha("\n".join(
+            _stable_json(row) for row in manifest
+        )),
         "source_records": len(rows),
         "production_requested": production_size,
         "production_selected": len(selected_production),
