@@ -13,11 +13,14 @@ from ragflow_style_pipeline.sag_semantic_prompt import _semantic_payload
 from ragflow_style_pipeline.sag_semantic_versions import (
     ADJUDICATION_MERGE_VERSION,
     ANNOTATION_AGREEMENT_VERSION,
+    CANDIDATE_LEDGER_VERSION,
+    DECISION_LEDGER_VERSION,
     EVAL_MANIFEST_VERSION,
     EVALUATION_VERSION,
     GOLD_SCHEMA_VERSION,
     GOLD_VALIDATION_VERSION,
     INPUT_PROFILE_VERSION,
+    LEDGER_GOLD_AUDIT_VERSION,
     VALIDATOR_REPLAY_VERSION,
     VALIDATOR_VERSION,
 )
@@ -1515,6 +1518,329 @@ def _read_jsonl_index(path):
                 raise ValueError(f"line_{line_number}:invalid_record")
             rows[str(value["doc_id"])] = value
     return rows
+
+
+def _semantic_frontier_mentions(semantic):
+    entities = semantic.get("entities") if isinstance(semantic, dict) else {}
+    mapping = {
+        "problem_objects": "problem_object",
+        "problem_behaviors": "problem_behavior",
+        "roads": "road",
+        "intersections": "intersection",
+        "pois": "poi",
+    }
+    mentions = set()
+    if not isinstance(entities, dict):
+        return mentions
+    for group, role in mapping.items():
+        for item in entities.get(group, []) if isinstance(entities.get(group), list) else []:
+            mention = _normalized_mention(item)
+            if mention:
+                mentions.add((role, mention))
+    return mentions
+
+
+def _audit_set_counts(raw, final, gold):
+    removed = raw - final
+    added = final - raw
+    return Counter({
+        "raw_tp": len(raw & gold),
+        "raw_fp": len(raw - gold),
+        "raw_fn": len(gold - raw),
+        "final_tp": len(final & gold),
+        "final_fp": len(final - gold),
+        "final_fn": len(gold - final),
+        "correctly_kept": len(raw & final & gold),
+        "incorrectly_kept": len((raw & final) - gold),
+        "correctly_removed": len(removed - gold),
+        "wrongly_removed": len(removed & gold),
+        "correct_additions": len(added & gold),
+        "incorrect_additions": len(added - gold),
+    })
+
+
+def audit_candidate_ledger_against_gold(
+    input_path,
+    gold_path,
+    candidate_ledger_path,
+    decision_ledger_path=None,
+):
+    """Audit pre/post-validator frontier mentions against completed issue gold."""
+    from ragflow_style_pipeline.sag_semantic_llm import _validate_with_sanitation
+
+    gold_validation = validate_gold_annotations(gold_path, require_complete=True)
+    if not gold_validation["ready_for_evaluation"]:
+        raise ValueError("gold_annotations_not_ready")
+    gold_index = _read_jsonl_index(gold_path)
+    target_ids = set(gold_index)
+    orders = {}
+    for order in iter_normalized_orders(input_path):
+        if "_profile_error" not in order and order["doc_id"] in target_ids:
+            orders[(order["doc_id"], order["content_hash"])] = order
+    expected = {
+        (doc_id, _text(row.get("content_hash"))) for doc_id, row in gold_index.items()
+    }
+    if expected - orders.keys():
+        raise ValueError("gold_order_identity_mismatch")
+
+    attempts = []
+    candidate_entries_total = 0
+    candidate_model_counts = Counter()
+    candidate_prompt_version_counts = Counter()
+    candidate_decoder_version_counts = Counter()
+    candidate_sequences = set()
+    with Path(candidate_ledger_path).open("r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != CANDIDATE_LEDGER_VERSION
+                or value.get("private") is not True
+            ):
+                raise ValueError(f"line_{line_number}:invalid_candidate_ledger")
+            candidate_entries_total += 1
+            identity = (_text(value.get("doc_id")), _text(value.get("content_hash")))
+            phase = _text(value.get("phase"))
+            sequence = value.get("ledger_sequence")
+            if (
+                phase not in {"primary", "repair"}
+                or not _text(value.get("run_attempt_id"))
+                or not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1
+                or sequence in candidate_sequences
+                or not isinstance(value.get("candidate"), dict)
+            ):
+                raise ValueError(f"line_{line_number}:invalid_candidate_attempt")
+            candidate_sequences.add(sequence)
+            if identity not in expected:
+                continue
+            candidate_model_counts[_text(value.get("model")) or "<EMPTY>"] += 1
+            candidate_prompt_version_counts[
+                _text(value.get("prompt_version")) or "<EMPTY>"
+            ] += 1
+            candidate_decoder_version_counts[
+                _text(value.get("decoder_contract_version")) or "<EMPTY>"
+            ] += 1
+            attempts.append((identity, phase, sequence, value))
+
+    decisions = {}
+    decision_entries_total = 0
+    decision_entries_matched = 0
+    decision_validator_version_counts = Counter()
+    decision_sequences = set()
+    if decision_ledger_path:
+        with Path(decision_ledger_path).open("r", encoding="utf-8") as source:
+            for line_number, line in enumerate(source, 1):
+                if not line.strip():
+                    continue
+                value = json.loads(line)
+                if (
+                    not isinstance(value, dict)
+                    or value.get("schema") != DECISION_LEDGER_VERSION
+                    or value.get("private") is not True
+                ):
+                    raise ValueError(f"line_{line_number}:invalid_decision_ledger")
+                decision_entries_total += 1
+                identity = (_text(value.get("doc_id")), _text(value.get("content_hash")))
+                phase = _text(value.get("phase"))
+                sequence = value.get("ledger_sequence")
+                if (
+                    phase not in {"primary", "repair"}
+                    or not _text(value.get("run_attempt_id"))
+                    or not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 1
+                    or sequence in decision_sequences
+                ):
+                    raise ValueError(f"line_{line_number}:invalid_decision_attempt")
+                decision_sequences.add(sequence)
+                if identity not in expected:
+                    continue
+                decision_entries_matched += 1
+                decision_validator_version_counts[
+                    _text(value.get("validator_version")) or "<EMPTY>"
+                ] += 1
+                key = (identity, phase, _text(value.get("run_attempt_id")))
+                current = decisions.get(key)
+                if current is None or sequence > current[0]:
+                    decisions[key] = (sequence, value)
+
+    validation_cache = {}
+
+    def current_result(identity, candidate_entry):
+        key = (
+            identity,
+            candidate_entry.get("phase"),
+            candidate_entry.get("ledger_sequence"),
+        )
+        if key not in validation_cache:
+            validation_cache[key] = _validate_with_sanitation(
+                orders[identity],
+                candidate_entry["candidate"],
+                candidate_entry.get("parse_warnings")
+                if isinstance(candidate_entry.get("parse_warnings"), list) else [],
+            )
+        return validation_cache[key]
+
+    latest_any = {}
+    for identity, _phase, sequence, value in attempts:
+        if identity not in latest_any or sequence > latest_any[identity][0]:
+            latest_any[identity] = (sequence, value)
+
+    latest_run_attempt = {
+        identity: _text(value.get("run_attempt_id"))
+        for identity, (_sequence, value) in latest_any.items()
+    }
+    latest_by_phase = {}
+    latest_final = {}
+    for identity, phase, sequence, value in attempts:
+        if _text(value.get("run_attempt_id")) != latest_run_attempt.get(identity):
+            continue
+        phase_key = (identity, phase)
+        if phase_key not in latest_by_phase or sequence > latest_by_phase[phase_key][0]:
+            latest_by_phase[phase_key] = (sequence, value)
+        _final, validation, _trace = current_result(identity, value)
+        terminal = phase == "repair" or validation.get("status") != "repair_required"
+        if terminal and (identity not in latest_final or sequence > latest_final[identity][0]):
+            latest_final[identity] = (sequence, value)
+    incomplete_latest_attempts = len(latest_any) - len(latest_final)
+
+    scope_counts = {name: Counter() for name in ("primary", "repair", "selected")}
+    role_counts = {
+        scope: defaultdict(Counter) for scope in ("primary", "repair", "selected")
+    }
+    current_action_counts = Counter()
+    original_action_counts = Counter()
+    original_status_counts = Counter()
+    current_status_counts = Counter()
+    validator_status_transitions = Counter()
+    missing_decisions = 0
+    traces = []
+
+    def audit_one(scope, identity, candidate_entry, selected_for_final):
+        nonlocal missing_decisions
+        candidate = candidate_entry["candidate"]
+        final, validation, trace = current_result(identity, candidate_entry)
+        gold_issues = _record_issues(gold_index[identity[0]])
+        gold_mentions = set().union(*gold_issues) if gold_issues else set()
+        raw_mentions = _semantic_frontier_mentions(candidate)
+        final_mentions = _semantic_frontier_mentions(final)
+        counts = _audit_set_counts(raw_mentions, final_mentions, gold_mentions)
+        scope_counts[scope].update(counts)
+        for role in sorted({item[0] for item in raw_mentions | final_mentions | gold_mentions}):
+            role_counts[scope][role].update(_audit_set_counts(
+                {item for item in raw_mentions if item[0] == role},
+                {item for item in final_mentions if item[0] == role},
+                {item for item in gold_mentions if item[0] == role},
+            ))
+        if scope == "selected":
+            current_action_counts.update(trace.get("sanitation_warnings", []))
+            current_status_counts[validation.get("status", "<EMPTY>")] += 1
+            decision_key = (
+                identity,
+                candidate_entry.get("phase"),
+                _text(candidate_entry.get("run_attempt_id")),
+            )
+            original = decisions.get(decision_key)
+            if decision_ledger_path and original is None:
+                missing_decisions += 1
+            elif original:
+                decision = original[1]
+                original_action_counts.update(decision.get("actions", []))
+                after = decision.get("validation_after")
+                original_status = (
+                    _text(after.get("status")) if isinstance(after, dict) else "<EMPTY>"
+                ) or "<EMPTY>"
+                original_status_counts[original_status] += 1
+                validator_status_transitions[
+                    f"{original_status}->{validation.get('status', '<EMPTY>')}"
+                ] += 1
+        traces.append({
+            "schema": LEDGER_GOLD_AUDIT_VERSION,
+            "private": True,
+            "doc_id": identity[0],
+            "content_hash": identity[1],
+            "phase": candidate_entry.get("phase"),
+            "scope": scope,
+            "selected_for_final": selected_for_final,
+            "run_attempt_id": candidate_entry.get("run_attempt_id", ""),
+            "ledger_sequence": candidate_entry.get("ledger_sequence"),
+            "raw_mentions": [list(item) for item in sorted(raw_mentions)],
+            "final_mentions": [list(item) for item in sorted(final_mentions)],
+            "gold_mentions": [list(item) for item in sorted(gold_mentions)],
+            "counts": dict(counts),
+            "current_validator_status": validation.get("status", ""),
+            "current_validator_actions": trace.get("sanitation_warnings", []),
+        })
+
+    for (identity, phase), (_sequence, entry) in sorted(latest_by_phase.items()):
+        audit_one(phase, identity, entry, latest_final.get(identity, (None, None))[1] is entry)
+    for identity, (_sequence, entry) in sorted(latest_final.items()):
+        audit_one("selected", identity, entry, True)
+
+    def summarize(counts):
+        raw = _prf(counts["raw_tp"], counts["raw_fp"], counts["raw_fn"])
+        final = _prf(counts["final_tp"], counts["final_fp"], counts["final_fn"])
+        removed = counts["correctly_removed"] + counts["wrongly_removed"]
+        added = counts["correct_additions"] + counts["incorrect_additions"]
+        return {
+            **dict(counts),
+            "raw_prf": raw,
+            "final_prf": final,
+            "deletion_precision": round(counts["correctly_removed"] / removed, 4)
+            if removed else None,
+            "addition_precision": round(counts["correct_additions"] / added, 4)
+            if added else None,
+        }
+
+    report = {
+        "schema": LEDGER_GOLD_AUDIT_VERSION,
+        "gold_schema": GOLD_SCHEMA_VERSION,
+        "validator_version": VALIDATOR_VERSION,
+        "private_inputs": True,
+        "gold_records": len(expected),
+        "input_source_sha256": _file_sha256(input_path),
+        "gold_source_sha256": _file_sha256(gold_path),
+        "candidate_source_sha256": _file_sha256(candidate_ledger_path),
+        "decision_source_sha256": _file_sha256(decision_ledger_path)
+        if decision_ledger_path else "",
+        "candidate_entries_total": candidate_entries_total,
+        "candidate_attempts_matched": len(attempts),
+        "candidate_attempts_unmatched": candidate_entries_total - len(attempts),
+        "records_with_any_candidates": len(latest_any),
+        "records_with_terminal_candidates": len(latest_final),
+        "gold_records_without_terminal_candidates": len(expected - latest_final.keys()),
+        "incomplete_latest_attempts": incomplete_latest_attempts,
+        "selection_policy": "latest_current_validator_terminal_attempt",
+        "candidate_model_counts": dict(candidate_model_counts),
+        "candidate_prompt_version_counts": dict(candidate_prompt_version_counts),
+        "candidate_decoder_version_counts": dict(candidate_decoder_version_counts),
+        "phase_records": dict(Counter(phase for _identity, phase in latest_by_phase)),
+        "scopes": {
+            scope: {
+                "micro": summarize(scope_counts[scope]),
+                "by_role": {
+                    role: summarize(counts)
+                    for role, counts in sorted(role_counts[scope].items())
+                },
+            }
+            for scope in ("primary", "repair", "selected")
+        },
+        "current_validator_action_counts": dict(current_action_counts),
+        "current_validator_status_counts": dict(current_status_counts),
+        "decision_entries_total": decision_entries_total,
+        "decision_entries_matched": decision_entries_matched,
+        "decision_entries_unmatched": decision_entries_total - decision_entries_matched,
+        "decision_validator_version_counts": dict(decision_validator_version_counts),
+        "selected_attempts_missing_decisions": missing_decisions,
+        "original_validator_action_counts": dict(original_action_counts),
+        "validator_action_count_delta": {
+            action: current_action_counts[action] - original_action_counts[action]
+            for action in sorted(set(current_action_counts) | set(original_action_counts))
+        },
+        "original_validator_status_counts": dict(original_status_counts),
+        "validator_status_transitions": dict(validator_status_transitions),
+    }
+    return report, traces
 
 
 def replay_candidate_ledger(input_path, candidate_ledger_path):

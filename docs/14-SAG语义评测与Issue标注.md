@@ -188,7 +188,29 @@ PYTHONPATH=src python scripts/replay_semantic_candidates.py \
   --report "$PRIVATE_ROOT/audit/replayed.report.safe.json"
 ```
 
-replay 输出仍含 evidence，必须保持私有；report 只含状态、动作和结构计数。
+replay 输出仍含 evidence，必须保持私有；report 只含状态、动作和结构计数。只有 final adjudicated gold 完成后，才能评估 gate 删除是否正确：
+
+```bash
+PYTHONPATH=src python scripts/audit_semantic_ledger.py \
+  --input "$INPUT_JSONL" \
+  --gold "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
+  --candidates "$PRIVATE_ROOT/model/candidates.private.jsonl" \
+  --decisions "$PRIVATE_ROOT/model/decisions.private.jsonl" \
+  --output "$PRIVATE_ROOT/audit/ledger.gold-audit.safe.json" \
+  --traces "$PRIVATE_ROOT/audit/ledger.gold-audit.traces.private.jsonl"
+```
+
+审计器在每条 gold 工单的最新 `run_attempt_id` 内，按当前 validator 选择最后一个 terminal attempt；崩溃后仅有 primary、仍需要 repair 的记录计为 incomplete，不会退回使用旧运行 repair。报告分别统计 primary、repair 和 selected 的：
+
+- raw/final mention precision、recall、F1；
+- correctly/incorrectly kept；
+- correctly/wrongly removed；
+- correct/incorrect additions；
+- deletion/addition precision；
+- object、behavior、road、intersection、POI 分角色指标；
+- original/current validator action counts、状态迁移和版本 provenance。
+
+这些指标只评 SAG frontier mention；issue attachment 仍由正式 semantic gold evaluator 评估。删除 precision 只在实际发生删除时定义，否则为 `null`。safe report 不含 doc_id、mention、evidence；逐工单 raw/final/gold 集合只存在于 private trace。
 
 独立版本：
 

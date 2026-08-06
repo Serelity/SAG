@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_audit import (
+    audit_candidate_ledger_against_gold,
     build_eval_manifest,
     build_private_annotation_packet,
     compare_gold_annotations,
@@ -423,6 +424,172 @@ class TestSemanticAudit(unittest.TestCase):
             {row["adjudication_provenance"]["resolution"] for row in rows},
             {"exact_agreement", "explicit_conflict"},
         )
+
+    def test_candidate_ledger_gold_audit_uses_latest_terminal_attempt(self):
+        documents = [
+            {
+                "doc_id": "ledger-doc-1",
+                "case_content_clean": "和平路方向路灯不亮",
+                "case_goal_clean": "要求维修",
+                "metadata": {"service_object_type": "求助"},
+            },
+            {
+                "doc_id": "ledger-doc-2",
+                "case_content_clean": "乙路井盖破损",
+                "case_goal_clean": "请求处理",
+                "metadata": {"service_object_type": "求助"},
+            },
+        ]
+        normalized = [normalize_work_order(row) for row in documents]
+
+        def mention(surface, field="case_content_clean"):
+            return {"surface": surface, "field": field, "evidence": surface}
+
+        gold_rows = []
+        for order, objects, predicates, road in (
+            (normalized[0], [mention("路灯")], [mention("不亮")], "和平路"),
+            (normalized[1], [mention("井盖")], [mention("破损")], "乙路"),
+        ):
+            gold_rows.append({
+                "schema": "sag_issue_gold_v2", "private": True, "subset": "challenge",
+                "doc_id": order["doc_id"], "content_hash": order["content_hash"],
+                "manifest_provenance": {
+                    "schema": "sag_semantic_eval_manifest_v2", "records": 2,
+                    "content_sha256": "sha256:" + "a" * 64,
+                },
+                "clean_fields": {
+                    key: order.get(key, "")
+                    for key in (
+                        "title_clean", "case_content_clean", "case_goal_clean",
+                        "address_detail_clean",
+                    )
+                },
+                "metadata": order["metadata"],
+                "issues": [{
+                    "mode": "problem", "time_scope": "current",
+                    "objects": objects, "predicates": predicates, "actions": [],
+                    "locations": [{"type": "road", **mention(road)}],
+                }],
+                "declared_intents": [], "direct_emotions": [],
+                "satisfaction": {"label": "unknown", "target": "", "evidence": ""},
+                "urgency": {"level": "normal", "evidence": ""},
+                "annotation": {
+                    "annotator": "referee", "status": "adjudicated", "notes": "done",
+                },
+            })
+
+        def empty_semantic(summary=""):
+            return {
+                "event_summary": summary,
+                "entities": {
+                    "problem_objects": [], "problem_behaviors": [], "roads": [],
+                    "intersections": [], "pois": [],
+                },
+                "discourse": {
+                    "intents": [], "emotions": [],
+                    "satisfaction": {"label": "unknown", "target": "", "evidence": ""},
+                    "urgency": {"level": "normal", "evidence": ""},
+                },
+            }
+
+        primary = empty_semantic("")
+        primary["entities"]["problem_objects"] = [{
+            "surface": "路灯", "canonical": "路灯",
+            "source_field": "case_content_clean", "evidence": "路灯",
+        }]
+        primary["entities"]["problem_behaviors"] = [{
+            "surface": "要求维修", "canonical": "要求维修",
+            "source_field": "case_goal_clean", "evidence": "要求维修",
+        }]
+        primary["entities"]["roads"] = [{
+            "surface": "和平路方向", "canonical": "和平路方向",
+            "source_field": "case_content_clean", "evidence": "和平路方向",
+        }]
+        primary["entities"]["pois"] = [{
+            "surface": "和平路", "canonical": "和平路",
+            "source_field": "case_content_clean", "evidence": "和平路",
+        }]
+        repair = empty_semantic("路灯不亮")
+        for group, value in (
+            ("problem_objects", "路灯"),
+            ("problem_behaviors", "不亮"),
+            ("roads", "和平路"),
+        ):
+            repair["entities"][group] = [{
+                "surface": value, "canonical": value,
+                "source_field": "case_content_clean", "evidence": value,
+            }]
+        incomplete = empty_semantic("")
+
+        candidate_rows = []
+        for sequence, order, phase, run_id, candidate in (
+            (1, normalized[0], "primary", "run-a", primary),
+            (2, normalized[0], "repair", "run-a", repair),
+            (3, normalized[1], "primary", "run-b", incomplete),
+        ):
+            candidate_rows.append({
+                "schema": "sag_semantic_candidate_ledger_v1", "private": True,
+                "doc_id": order["doc_id"], "content_hash": order["content_hash"],
+                "phase": phase, "run_attempt_id": run_id,
+                "ledger_sequence": sequence, "model": "Qwen/Qwen3-4B",
+                "prompt_version": "sag_semantic_v7",
+                "decoder_contract_version": "unconstrained_json_v1",
+                "candidate": candidate, "parse_warnings": [],
+                "generation": {},
+            })
+        decision = {
+            "schema": "sag_semantic_decision_ledger_v1", "private": True,
+            "validator_version": "sag_semantic_validator_v1",
+            "doc_id": normalized[0]["doc_id"],
+            "content_hash": normalized[0]["content_hash"],
+            "phase": "repair", "run_attempt_id": "run-a", "ledger_sequence": 2,
+            "parse_warnings": [], "validation_before": {}, "actions": [],
+            "validation_after": {"status": "accepted", "warnings": []},
+            "final_counts": {},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            input_path = root / "input.jsonl"
+            gold_path = root / "gold.private.jsonl"
+            candidates_path = root / "candidates.private.jsonl"
+            decisions_path = root / "decisions.private.jsonl"
+            input_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in documents),
+                encoding="utf-8",
+            )
+            gold_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in gold_rows),
+                encoding="utf-8",
+            )
+            candidates_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in candidate_rows),
+                encoding="utf-8",
+            )
+            decisions_path.write_text(
+                json.dumps(decision, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            report, traces = audit_candidate_ledger_against_gold(
+                input_path, gold_path, candidates_path, decisions_path
+            )
+        selected = report["scopes"]["selected"]["micro"]
+        primary_metrics = report["scopes"]["primary"]["micro"]
+        self.assertEqual(report["candidate_entries_total"], 3)
+        self.assertEqual(report["records_with_any_candidates"], 2)
+        self.assertEqual(report["records_with_terminal_candidates"], 1)
+        self.assertEqual(report["incomplete_latest_attempts"], 1)
+        self.assertEqual(report["gold_records_without_terminal_candidates"], 1)
+        self.assertEqual(report["phase_records"], {"primary": 2, "repair": 1})
+        self.assertEqual(selected["final_tp"], 3)
+        self.assertEqual(selected["final_fp"], 0)
+        self.assertEqual(selected["final_fn"], 0)
+        self.assertGreaterEqual(primary_metrics["correctly_removed"], 2)
+        self.assertGreaterEqual(primary_metrics["correct_additions"], 1)
+        self.assertEqual(report["selected_attempts_missing_decisions"], 0)
+        self.assertEqual(report["original_validator_status_counts"], {"accepted": 1})
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("ledger-doc", serialized)
+        self.assertNotIn("和平路", serialized)
+        self.assertTrue(all(row["private"] for row in traces))
 
     def test_candidate_replay_selects_latest_attempt_without_invoking_model(self):
         order_document = {
