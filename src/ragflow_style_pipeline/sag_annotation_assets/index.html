@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SAG 私有语义标注</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <div>
+      <h1>SAG 私有语义标注</h1>
+      <p>仅限本机 loopback；正文、evidence 和标注不会离开本地。</p>
+    </div>
+    <div id="progress" class="pill">加载中</div>
+  </header>
+  <nav>
+    <button id="previous" type="button">上一条</button>
+    <label>记录 <input id="record-index" type="number" min="1" step="1"></label>
+    <span id="record-total"></span>
+    <button id="go" type="button">跳转</button>
+    <button id="next" type="button">下一条</button>
+    <span id="subset" class="pill"></span>
+  </nav>
+  <main>
+    <section>
+      <h2>脱敏原文与 metadata</h2>
+      <p class="hint">可在任意原文字段中选中文字，再点表单行的“取选中文字”。</p>
+      <div id="clean-fields"></div>
+      <dl id="metadata"></dl>
+    </section>
+    <section>
+      <div class="section-title">
+        <h2>Issue frames</h2>
+        <button id="add-issue" type="button">添加 issue</button>
+      </div>
+      <div id="issues"></div>
+    </section>
+    <section>
+      <div class="section-title"><h2>显式意图</h2><button id="add-intent" type="button">添加</button></div>
+      <div id="intents"></div>
+    </section>
+    <section>
+      <div class="section-title"><h2>直接情绪</h2><button id="add-emotion" type="button">添加</button></div>
+      <div id="emotions"></div>
+    </section>
+    <section class="two-column">
+      <fieldset id="satisfaction"><legend>满意度</legend></fieldset>
+      <fieldset id="urgency"><legend>紧迫度</legend></fieldset>
+    </section>
+    <section>
+      <label class="stack">标注说明<textarea id="notes" rows="3"></textarea></label>
+      <div id="validation" aria-live="polite"></div>
+      <div class="save-bar">
+        <button id="save-draft" type="button">保存草稿</button>
+        <button id="save-complete" type="button" class="primary">验证并完成</button>
+      </div>
+    </section>
+  </main>
+  <template id="member-template">
+    <div class="member-row">
+      <input class="surface" placeholder="surface">
+      <select class="field"></select>
+      <input class="evidence wide" placeholder="逐字 evidence">
+      <button class="selection" type="button">取选中文字</button>
+      <button class="remove danger" type="button">删除</button>
+    </div>
+  </template>
+  <script src="/app.js"></script>
+</body>
+</html>

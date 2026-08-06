@@ -749,6 +749,21 @@ def _validate_gold_row(row, require_complete=False, expected_annotator=""):
     return errors, warnings
 
 
+def validate_gold_record(record, require_complete=False, expected_annotator=""):
+    """Return aggregate-safe validation codes for one private gold record."""
+    if not isinstance(record, dict):
+        return {"errors": ["record_not_object"], "warnings": []}
+    errors, warnings = _validate_gold_row(
+        record,
+        require_complete=bool(require_complete),
+        expected_annotator=_text(expected_annotator),
+    )
+    return {
+        "errors": list(dict.fromkeys(errors)),
+        "warnings": list(dict.fromkeys(warnings)),
+    }
+
+
 def validate_gold_annotations(path, require_complete=False, expected_annotator=""):
     """Validate private issue annotation structure without exposing identifiers or text."""
     rows, parse_errors = _load_annotation_rows(path)

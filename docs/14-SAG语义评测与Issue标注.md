@@ -139,6 +139,16 @@ PYTHONPATH=src python scripts/prepare_semantic_annotation_round.py \
 
 工具冻结 source packet SHA-256 和 round ID，并把两份状态置为 `in_progress`。compare 会拒绝 provenance 缺失、轮次混用或来源不同的 A/B 文件。
 
+可使用无第三方依赖的本地结构化工作台，避免直接编辑嵌套 JSONL：
+
+```bash
+PYTHONPATH=src python scripts/run_semantic_annotation_workbench.py \
+  --input "$PRIVATE_ROOT/audit/eval.annotator-a.private.jsonl" \
+  --annotator annotator-a
+```
+
+工作台固定监听 `127.0.0.1`，使用随机 HttpOnly 会话 cookie、严格 Host/Origin 检查、CSP 和 `no-store`；没有远程绑定参数，也不引用外部脚本、字体或样式。页面不展示 `doc_id/content_hash/provenance`，但会展示私有脱敏正文、evidence 和标注，因此只应在受控本机打开，不得截图或转发 bootstrap URL。每次保存只接收可编辑 annotation payload，源字段和 provenance 不能由浏览器覆盖；保存前复用 gold v2 validator，无效记录不落盘；有效记录通过临时文件、`fsync` 和 `os.replace` 原子写入，并在同目录保留一份 `*.bak` 私有备份。若原 JSONL 被其他程序修改，revision 检查会拒绝覆盖。
+
 完成一份标注后先做严格验证。safe report 不含正文、evidence、doc_id 或标注者姓名：
 
 ```bash
