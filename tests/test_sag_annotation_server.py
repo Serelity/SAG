@@ -99,6 +99,27 @@ class TestAnnotationServer(unittest.TestCase):
         self.assertIn("default-src 'none'", headers["content-security-policy"])
         self.assertEqual(json.loads(body)["records"], 2)
 
+    def test_serves_chinese_annotation_guide_and_labels(self):
+        status, headers, _body = self._request(
+            "GET", "/?token=private-bootstrap-token"
+        )
+        self.assertEqual(status, 303)
+        cookie = headers["set-cookie"].split(";", 1)[0]
+        status, _headers, html = self._request(
+            "GET", "/", headers={"Cookie": cookie}
+        )
+        self.assertEqual(status, 200)
+        decoded_html = html.decode("utf-8")
+        self.assertIn("第一次使用？点这里看填写步骤", decoded_html)
+        self.assertIn("事实与诉求单元", decoded_html)
+        status, _headers, javascript = self._request(
+            "GET", "/app.js", headers={"Cookie": cookie}
+        )
+        self.assertEqual(status, 200)
+        decoded_javascript = javascript.decode("utf-8")
+        self.assertIn('value: "problem", label: "问题/故障', decoded_javascript)
+        self.assertIn("未保存，请按下面提示修改", decoded_javascript)
+
     def test_rejects_wrong_host_and_cross_origin_post(self):
         status, _headers, _body = self._request(
             "GET", "/?token=private-bootstrap-token", headers={"Host": "localhost:1"}

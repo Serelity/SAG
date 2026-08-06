@@ -9,63 +9,67 @@
 <body>
   <header>
     <div>
-      <h1>SAG 私有语义标注</h1>
-      <p>仅限本机 loopback；正文、evidence 和标注不会离开本地。</p>
+      <h1>SAG 工单语义标注（本机私有）</h1>
+      <p>页面只在本机运行；脱敏正文、证据和标注不会发送到外部。</p>
     </div>
-    <div id="progress" class="pill">加载中</div>
+    <div id="progress" class="pill">正在加载</div>
   </header>
   <nav>
     <button id="previous" type="button">上一条</button>
-    <label>记录 <input id="record-index" type="number" min="1" step="1"></label>
+    <label>第 <input id="record-index" type="number" min="1" step="1"> 条</label>
     <span id="record-total"></span>
     <button id="go" type="button">跳转</button>
     <button id="next" type="button">下一条</button>
     <span id="subset" class="pill"></span>
   </nav>
   <main>
+    <section class="guide">
+      <details open>
+        <summary>第一次使用？点这里看填写步骤</summary>
+        <div class="guide-grid">
+          <div><strong>第 1 步：读当前工单</strong><p>先读“工单内容”和“诉求目标”。历史办理过程与市民当前反映要分开，不要把系统元数据当成正文事实。</p></div>
+          <div><strong>第 2 步：添加事实/诉求单元</strong><p>每条完成记录至少有一个单元。同一对象的“实际问题”和“希望采取的动作”通常分成“问题/故障”和“请求办理”两个单元；多个互不相关的问题也要拆开。</p></div>
+          <div><strong>第 3 步：填写成员和证据</strong><p>对象填“什么东西/事项”，状态或问题填“怎么了/问什么”，诉求动作填“希望怎么处理”。证据必须是上方原文中连续、逐字一致的片段。</p></div>
+          <div><strong>第 4 步：谨慎填辅助语义</strong><p>意图、情绪、满意度、紧迫度只在原文直接表达时填写。没有直接证据就留空，满意度选“未知”，紧迫度选“普通”。</p></div>
+        </div>
+        <div class="example"><strong>简单示例：</strong>原文表达“路灯不亮，希望维修”时，可建一个“问题/故障”单元（对象：路灯；状态：不亮），再建一个“请求办理”单元（诉求动作：维修）。每一项都从原文选择对应证据。</div>
+      </details>
+    </section>
     <section>
-      <h2>脱敏原文与 metadata</h2>
-      <p class="hint">可在任意原文字段中选中文字，再点表单行的“取选中文字”。</p>
+      <h2>一、脱敏工单原文</h2>
+      <p class="hint"><strong>取证据的方法：</strong>用鼠标在某一个原文字段内选中连续文字，再点击对应表单行的“使用选中文字”。</p>
       <div id="clean-fields"></div>
-      <dl id="metadata"></dl>
+      <details class="metadata-details"><summary>查看系统元数据（仅供参考，不能代替原文证据）</summary><dl id="metadata"></dl></details>
     </section>
     <section>
       <div class="section-title">
-        <h2>Issue frames</h2>
-        <button id="add-issue" type="button">添加 issue</button>
+        <div><h2>二、事实与诉求单元</h2><p class="hint">完成标注至少需要一个单元；不同问题、历史答复、当前诉求应按语义拆分。</p></div>
+        <button id="add-issue" type="button">添加一个单元</button>
       </div>
       <div id="issues"></div>
     </section>
     <section>
-      <div class="section-title"><h2>显式意图</h2><button id="add-intent" type="button">添加</button></div>
+      <div class="section-title"><div><h2>三、原文明说的意图（可为空）</h2><p class="hint">例如明确出现投诉、咨询、建议、催办等表达；不要只根据系统登记类型推断。</p></div><button id="add-intent" type="button">添加意图</button></div>
       <div id="intents"></div>
     </section>
     <section>
-      <div class="section-title"><h2>直接情绪</h2><button id="add-emotion" type="button">添加</button></div>
+      <div class="section-title"><div><h2>四、原文明说的情绪（可为空）</h2><p class="hint">只标市民直接表达的情绪，不根据事件严重程度猜测情绪。</p></div><button id="add-emotion" type="button">添加情绪</button></div>
       <div id="emotions"></div>
     </section>
     <section class="two-column">
-      <fieldset id="satisfaction"><legend>满意度</legend></fieldset>
-      <fieldset id="urgency"><legend>紧迫度</legend></fieldset>
+      <fieldset id="satisfaction"><legend>五、对办理结果的满意度</legend></fieldset>
+      <fieldset id="urgency"><legend>六、紧迫程度</legend></fieldset>
     </section>
     <section>
-      <label class="stack">标注说明<textarea id="notes" rows="3"></textarea></label>
+      <label class="stack">标注备注（可选）<textarea id="notes" rows="3" placeholder="记录边界不清、需要仲裁的原因；不要填写身份信息。"></textarea></label>
       <div id="validation" aria-live="polite"></div>
       <div class="save-bar">
+        <span class="hint">快捷键：Ctrl+S 保存草稿；Ctrl+Enter 验证并完成</span>
         <button id="save-draft" type="button">保存草稿</button>
-        <button id="save-complete" type="button" class="primary">验证并完成</button>
+        <button id="save-complete" type="button" class="primary">检查无误，标记完成</button>
       </div>
     </section>
   </main>
-  <template id="member-template">
-    <div class="member-row">
-      <input class="surface" placeholder="surface">
-      <select class="field"></select>
-      <input class="evidence wide" placeholder="逐字 evidence">
-      <button class="selection" type="button">取选中文字</button>
-      <button class="remove danger" type="button">删除</button>
-    </div>
-  </template>
   <script src="/app.js"></script>
 </body>
 </html>
