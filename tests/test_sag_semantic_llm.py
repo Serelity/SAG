@@ -479,6 +479,133 @@ class TestSemanticLlm(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported_backend"):
             _load_configured_generator("unused", {"backend":"unknown"})
 
+    def test_identity_manifest_selects_exact_hash_beyond_limit(self):
+        documents = [
+            {"doc_id":"order_1", "case_content_clean":"第一条普通记录"},
+            {"doc_id":"unrelated-invalid", "case_content_clean":""},
+            {"doc_id":"order_2", "case_content_clean":"港龙新港城北门口有摊贩占道。"},
+        ]
+        from ragflow_style_pipeline.work_order_input import normalize_work_order
+        target = normalize_work_order(documents[2])
+        manifest_row = {
+            "schema":"sag_semantic_eval_manifest_v2", "subset":"challenge",
+            "doc_id":target["doc_id"], "content_hash":target["content_hash"],
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root/"orders.jsonl"
+            manifest = root/"manifest.private.jsonl"
+            source.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in documents),
+                encoding="utf-8",
+            )
+            manifest.write_text(
+                json.dumps(manifest_row, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            generator = RecordingGenerator(False)
+            report = run_semantic_extraction(
+                source, root/"semantic.jsonl", root/"rejects.jsonl",
+                root/"run.json", root/"quality.json", "unused",
+                {
+                    "model_id":"Qwen/Qwen3-4B", "prompt_version":"sag_semantic_v7",
+                    "batch_size":1, "checkpoint_every":1,
+                },
+                limit=1,
+                generator=generator,
+                identity_manifest_path=manifest,
+            )
+            record = json.loads((root/"semantic.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(report["input_records_scanned"], 3)
+        self.assertEqual(report["orders_input"], 1)
+        self.assertEqual(report["ignored_invalid_input_records"], 1)
+        self.assertEqual(report["identity_manifest_records"], 1)
+        self.assertTrue(report["identity_manifest_enabled"])
+        self.assertTrue(report["identity_manifest_sha256"].startswith("sha256:"))
+        self.assertEqual(record["doc_id"], "order_2")
+        self.assertEqual(len(generator.calls), 1)
+
+    def test_identity_manifest_resume_rejects_mixed_output(self):
+        from ragflow_style_pipeline.work_order_input import normalize_work_order
+        documents = [
+            {"doc_id":"resume-1", "case_content_clean":"第一条普通记录"},
+            {"doc_id":"resume-2", "case_content_clean":"港龙新港城北门口有摊贩占道。"},
+        ]
+        normalized = [normalize_work_order(row) for row in documents]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root/"orders.jsonl"
+            manifest = root/"manifest.private.jsonl"
+            diagnostic = root/"diagnostics.jsonl"
+            source.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in documents),
+                encoding="utf-8",
+            )
+            def write_manifest(order):
+                manifest.write_text(json.dumps({
+                    "schema":"sag_semantic_eval_manifest_v2", "subset":"challenge",
+                    "doc_id":order["doc_id"], "content_hash":order["content_hash"],
+                }) + "\n", encoding="utf-8")
+            write_manifest(normalized[0])
+            config = {
+                "model_id":"Qwen/Qwen3-4B", "prompt_version":"sag_semantic_v7",
+                "batch_size":1, "checkpoint_every":1,
+            }
+            run_semantic_extraction(
+                source, root/"semantic.jsonl", root/"rejects.jsonl",
+                root/"run.json", root/"quality.json", "unused", config,
+                generator=RecordingGenerator(False),
+                identity_manifest_path=manifest,
+                diagnostic_path=diagnostic,
+            )
+            write_manifest(normalized[1])
+            second_generator = RecordingGenerator(False)
+            with self.assertRaisesRegex(ValueError, "identity_manifest_resume_mismatch"):
+                run_semantic_extraction(
+                    source, root/"semantic.jsonl", root/"rejects.jsonl",
+                    root/"run.json", root/"quality.json", "unused", config,
+                    resume=True,
+                    generator=second_generator,
+                    identity_manifest_path=manifest,
+                    diagnostic_path=diagnostic,
+                )
+            diagnostics = [
+                json.loads(line) for line in diagnostic.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(second_generator.calls, [])
+        self.assertEqual(diagnostics[-1]["stage"], "resume_validation")
+        self.assertNotIn("resume-1", json.dumps(diagnostics, ensure_ascii=False))
+
+    def test_identity_manifest_hash_drift_fails_before_model_without_id_leak(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root/"orders.jsonl"
+            manifest = root/"manifest.private.jsonl"
+            diagnostic = root/"diagnostics.jsonl"
+            self._input(source)
+            manifest.write_text(json.dumps({
+                "schema":"sag_semantic_eval_manifest_v2", "subset":"challenge",
+                "doc_id":"order_1", "content_hash":"sha256:wrong-secret-hash",
+            }) + "\n", encoding="utf-8")
+            generator = RecordingGenerator(False)
+            with self.assertRaisesRegex(ValueError, "identity_manifest_input_mismatch"):
+                run_semantic_extraction(
+                    source, root/"semantic.jsonl", root/"rejects.jsonl",
+                    root/"run.json", root/"quality.json", "unused",
+                    {"model_id":"Qwen/Qwen3-4B", "prompt_version":"sag_semantic_v7"},
+                    generator=generator,
+                    identity_manifest_path=manifest,
+                    diagnostic_path=diagnostic,
+                )
+            diagnostics = [
+                json.loads(line) for line in diagnostic.read_text(encoding="utf-8").splitlines()
+            ]
+        self.assertEqual(generator.calls, [])
+        self.assertEqual(diagnostics[-1]["stage"], "identity_selection")
+        self.assertEqual(diagnostics[-1]["exception_type"], "ValueError")
+        serialized = json.dumps(diagnostics, ensure_ascii=False)
+        self.assertNotIn("order_1", serialized)
+        self.assertNotIn("wrong-secret-hash", serialized)
+
     def test_cli_exposes_safe_arguments(self):
         args = parse_args(["--input","safe.multiview.jsonl","--output","outputs/a.jsonl","--rejects","outputs/r.jsonl","--run-report","outputs/run.json","--quality-report","outputs/q.json","--config","config.json","--model-path","models/Qwen3-4B"])
         self.assertTrue(args.input.endswith(".multiview.jsonl"))
@@ -498,10 +625,11 @@ class TestSemanticLlm(unittest.TestCase):
             "--input","safe.multiview.jsonl","--output","outputs/a.jsonl","--rejects","outputs/r.jsonl",
             "--run-report","outputs/run.json","--quality-report","outputs/q.json","--config","config.json",
             "--model-path","models/Qwen3-4B","--candidate-ledger","outputs/c.private.jsonl",
-            "--decision-ledger","outputs/d.private.jsonl",
+            "--decision-ledger","outputs/d.private.jsonl", "--identity-manifest","manifest.jsonl",
         ])
         self.assertEqual(private.candidate_ledger, "outputs/c.private.jsonl")
         self.assertEqual(private.decision_ledger, "outputs/d.private.jsonl")
+        self.assertEqual(private.identity_manifest, "manifest.jsonl")
 
 
 if __name__ == "__main__":

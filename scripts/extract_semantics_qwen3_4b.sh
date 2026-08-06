@@ -15,11 +15,14 @@ LIMIT="${LIMIT:-100000}"
 BATCH_SIZE="${BATCH_SIZE:-}"
 REPAIR_BATCH_SIZE="${REPAIR_BATCH_SIZE:-}"
 BACKEND="${BACKEND:-}"
+IDENTITY_MANIFEST="${IDENTITY_MANIFEST:-}"
 
 [[ "$INPUT_JSONL" == *.jsonl ]] || { echo "INPUT_JSONL must be desensitized multiview JSONL" >&2; exit 2; }
 [[ -f "$INPUT_JSONL" ]] || { echo "Missing input: $INPUT_JSONL" >&2; exit 2; }
 [[ -f "$CONFIG" ]] || { echo "Missing config: $CONFIG" >&2; exit 2; }
 [[ -d "$MODEL_PATH" ]] || { echo "Missing server-local model: $MODEL_PATH" >&2; exit 2; }
+[[ -z "$IDENTITY_MANIFEST" || -f "$IDENTITY_MANIFEST" ]] || { echo "Missing identity manifest: $IDENTITY_MANIFEST" >&2; exit 2; }
+[[ -z "$IDENTITY_MANIFEST" || -z "${DOC_ID_FILE:-}" ]] || { echo "IDENTITY_MANIFEST and DOC_ID_FILE are mutually exclusive" >&2; exit 2; }
 mkdir -p \
   "$(dirname "$OUTPUT")" "$(dirname "$REJECTS")" \
   "$(dirname "$RUN_REPORT")" "$(dirname "$QUALITY_REPORT")" \
@@ -28,10 +31,11 @@ mkdir -p \
 [[ -n "$DECISION_LEDGER" ]] && mkdir -p "$(dirname "$DECISION_LEDGER")"
 
 df -h "$(dirname "$OUTPUT")"
-printf 'input=%s\nconfig=%s\nmodel=%s\nlimit=%s\nbatch_size=%s\nrepair_batch_size=%s\nbackend=%s\ndiagnostic_log=%s\ncandidate_ledger=%s\ndecision_ledger=%s\n' \
+printf 'input=%s\nconfig=%s\nmodel=%s\nlimit=%s\nbatch_size=%s\nrepair_batch_size=%s\nbackend=%s\ndiagnostic_log=%s\ncandidate_ledger=%s\ndecision_ledger=%s\nidentity_manifest=%s\n' \
   "$INPUT_JSONL" "$CONFIG" "$MODEL_PATH" "$LIMIT" "${BATCH_SIZE:-config-default}" \
   "${REPAIR_BATCH_SIZE:-config-default}" "${BACKEND:-config-default}" "$DIAGNOSTIC_LOG" \
-  "${CANDIDATE_LEDGER:-disabled}" "${DECISION_LEDGER:-disabled}"
+  "${CANDIDATE_LEDGER:-disabled}" "${DECISION_LEDGER:-disabled}" \
+  "${IDENTITY_MANIFEST:-disabled}"
 
 args=(
   --input "$INPUT_JSONL" --config "$CONFIG" --model-path "$MODEL_PATH"
@@ -46,5 +50,6 @@ args=(
 [[ "${RESUME:-0}" == "1" ]] && args+=(--resume)
 [[ "${RETRY_REJECTED:-0}" == "1" ]] && args+=(--retry-rejected)
 [[ -n "${DOC_ID_FILE:-}" ]] && args+=(--doc-id-file "$DOC_ID_FILE")
+[[ -n "$IDENTITY_MANIFEST" ]] && args+=(--identity-manifest "$IDENTITY_MANIFEST")
 
 PYTHONPATH=src PYTHONIOENCODING=utf-8 python -m ragflow_style_pipeline.sag_semantic_llm "${args[@]}"

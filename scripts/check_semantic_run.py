@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import re
 from collections import Counter
 from pathlib import Path
 
@@ -73,6 +74,27 @@ def check(args):
         raise ValueError(f"record_count_mismatch:{expected}:{len(semantic)}")
     if run.get("rejects_written") is not None and int(run["rejects_written"]) != len(rejects):
         raise ValueError("reject_count_mismatch")
+    manifest_check = {"enabled": bool(run.get("identity_manifest_enabled"))}
+    if manifest_check["enabled"]:
+        manifest_records = int(run.get("identity_manifest_records", -1))
+        orders_input = int(run.get("orders_input", -1))
+        scanned = int(run.get("input_records_scanned", -1))
+        ignored_invalid = int(run.get("ignored_invalid_input_records", -1))
+        manifest_sha256 = str(run.get("identity_manifest_sha256", ""))
+        if manifest_records < 1 or manifest_records != orders_input:
+            raise ValueError("identity_manifest_count_mismatch")
+        if scanned < orders_input or ignored_invalid < 0:
+            raise ValueError("identity_manifest_scan_counts_invalid")
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_sha256):
+            raise ValueError("identity_manifest_hash_invalid")
+        if len(semantic) + len(rejects) != orders_input:
+            raise ValueError("identity_manifest_output_count_mismatch")
+        manifest_check.update({
+            "records": manifest_records,
+            "input_records_scanned": scanned,
+            "ignored_invalid_input_records": ignored_invalid,
+            "sha256": manifest_sha256,
+        })
 
     result = {
         "semantic_records": len(semantic),
@@ -81,6 +103,7 @@ def check(args):
         "warning_counts": dict(warnings),
         "repair_attempts": repairs,
         "finish_reason_counts": dict(finish_reasons),
+        "identity_manifest": manifest_check,
         "hashes": {
             "semantic": digest(args.semantic),
             "rejects": digest(args.rejects),

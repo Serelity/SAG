@@ -21,6 +21,7 @@ from ragflow_style_pipeline.sag_semantic_versions import (
     CANDIDATE_LEDGER_VERSION,
     DECISION_LEDGER_VERSION,
     DECODER_CONTRACT_VERSION,
+    EVAL_MANIFEST_VERSION,
     PROJECTION_VERSION,
     VALIDATOR_VERSION,
 )
@@ -29,7 +30,7 @@ from ragflow_style_pipeline.sag_semantic_validation import (
     sanitize_semantic_output,
     validate_semantic_output,
 )
-from ragflow_style_pipeline.work_order_input import read_work_orders
+from ragflow_style_pipeline.work_order_input import normalize_work_order, read_work_orders
 
 
 def _utc_now():
@@ -39,6 +40,88 @@ def _utc_now():
 def _config_hash(config):
     encoded = json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def _file_hash(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(block)
+    return "sha256:" + digest.hexdigest()
+
+
+def _load_identity_manifest(path):
+    identities = []
+    doc_ids = set()
+    seen = set()
+    with Path(path).open("r", encoding="utf-8") as source:
+        for line_number, line in enumerate(source, 1):
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            identity = (
+                str(value.get("doc_id") or "").strip() if isinstance(value, dict) else "",
+                str(value.get("content_hash") or "").strip() if isinstance(value, dict) else "",
+            )
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != EVAL_MANIFEST_VERSION
+                or not all(identity)
+                or identity in seen
+                or identity[0] in doc_ids
+            ):
+                raise ValueError(f"line_{line_number}:invalid_identity_manifest")
+            seen.add(identity)
+            doc_ids.add(identity[0])
+            identities.append(identity)
+    if not identities:
+        raise ValueError("empty_identity_manifest")
+    return identities
+
+
+def _read_manifest_orders(path, identities):
+    expected_hash_by_doc = dict(identities)
+    selected_by_doc = {}
+    records_scanned = 0
+    ignored_invalid_records = 0
+    with Path(path).open("r", encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            records_scanned += 1
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                ignored_invalid_records += 1
+                continue
+            if not isinstance(value, dict):
+                ignored_invalid_records += 1
+                continue
+            doc_id = str(value.get("doc_id") or "").strip()
+            if doc_id not in expected_hash_by_doc:
+                try:
+                    normalize_work_order(value)
+                except Exception:
+                    ignored_invalid_records += 1
+                continue
+            if doc_id in selected_by_doc:
+                raise ValueError("duplicate_manifest_doc_id_in_input")
+            try:
+                order = normalize_work_order(value)
+            except Exception as error:
+                raise ValueError("identity_manifest_target_invalid") from error
+            if order.get("content_hash") != expected_hash_by_doc[doc_id]:
+                raise ValueError("identity_manifest_input_mismatch")
+            selected_by_doc[doc_id] = order
+    if set(selected_by_doc) != set(expected_hash_by_doc):
+        raise ValueError("identity_manifest_input_mismatch")
+    return (
+        [selected_by_doc[doc_id] for doc_id, _content_hash in identities],
+        {
+            "records_scanned": records_scanned,
+            "ignored_invalid_records": ignored_invalid_records,
+        },
+    )
 
 
 def _environment_bool(name, default):
@@ -672,11 +755,13 @@ def _quality_report(records, rejects):
 def run_semantic_extraction(
     input_path, output_path, rejects_path, run_report_path, quality_report_path,
     model_path, config, limit=None, resume=False, retry_rejected=False, generator=None,
-    doc_ids=None, diagnostic_path=None, candidate_ledger_path=None,
-    decision_ledger_path=None,
+    doc_ids=None, identity_manifest_path=None, diagnostic_path=None,
+    candidate_ledger_path=None, decision_ledger_path=None,
 ):
     """Run one primary request per order and at most one selective repair."""
     del retry_rejected  # Rejected rows are selected with doc_ids for an explicit safe rerun.
+    if doc_ids is not None and identity_manifest_path:
+        raise ValueError("doc_ids_and_identity_manifest_are_mutually_exclusive")
     started_wall = time.time()
     started_at = _utc_now()
     run_attempt_id = hashlib.sha256(
@@ -706,27 +791,92 @@ def run_semantic_extraction(
     })
     stage_seconds = {
         "input_read": 0.0,
+        "identity_selection": 0.0,
         "model_load": 0.0,
         "prompt_build": 0.0,
         "generation_wall": 0.0,
         "validation": 0.0,
         "artifact_write": 0.0,
     }
-    stage_started = time.perf_counter()
-    try:
-        orders = read_work_orders(input_path, limit=limit)
-        stage_seconds["input_read"] += time.perf_counter() - stage_started
-    except Exception as error:
-        _append_diagnostic(diagnostic_path, {
-            "event": "run_failed", "ts": _utc_now(), "stage": "input_read",
-            "exception_type": type(error).__name__,
-        })
-        raise
-    if doc_ids is not None:
-        selected = set(doc_ids)
-        orders = [order for order in orders if order["doc_id"] in selected]
+    identity_manifest_hash = ""
+    identity_manifest_records = 0
+    identity_manifest_identities = None
+    ignored_invalid_input_records = 0
+    if identity_manifest_path:
+        selection_started = time.perf_counter()
+        try:
+            identities = _load_identity_manifest(identity_manifest_path)
+            identity_manifest_identities = set(identities)
+            identity_manifest_hash = _file_hash(identity_manifest_path)
+            identity_manifest_records = len(identities)
+        except Exception as error:
+            stage_seconds["identity_selection"] += time.perf_counter() - selection_started
+            _append_diagnostic(diagnostic_path, {
+                "event": "run_failed", "ts": _utc_now(), "stage": "identity_selection",
+                "exception_type": type(error).__name__,
+            })
+            raise
+        stage_seconds["identity_selection"] += time.perf_counter() - selection_started
+        stage_started = time.perf_counter()
+        try:
+            # Scan the full desensitized input because frozen identities may
+            # occur anywhere. Unrelated malformed rows are counted and skipped;
+            # every target row remains strict and hash-bound.
+            orders, scan = _read_manifest_orders(input_path, identities)
+            input_records_scanned = scan["records_scanned"]
+            ignored_invalid_input_records = scan["ignored_invalid_records"]
+            stage_seconds["input_read"] += time.perf_counter() - stage_started
+        except Exception as error:
+            stage_seconds["input_read"] += time.perf_counter() - stage_started
+            _append_diagnostic(diagnostic_path, {
+                "event": "run_failed", "ts": _utc_now(), "stage": "identity_selection",
+                "exception_type": type(error).__name__,
+            })
+            raise
+    else:
+        stage_started = time.perf_counter()
+        try:
+            orders = read_work_orders(input_path, limit=limit)
+            input_records_scanned = len(orders)
+            stage_seconds["input_read"] += time.perf_counter() - stage_started
+        except Exception as error:
+            stage_seconds["input_read"] += time.perf_counter() - stage_started
+            _append_diagnostic(diagnostic_path, {
+                "event": "run_failed", "ts": _utc_now(), "stage": "input_read",
+                "exception_type": type(error).__name__,
+            })
+            raise
+        if doc_ids is not None:
+            selection_started = time.perf_counter()
+            selected = set(doc_ids)
+            orders = [order for order in orders if order["doc_id"] in selected]
+            stage_seconds["identity_selection"] += time.perf_counter() - selection_started
 
     existing = _read_jsonl(output_path) if resume and output_path.exists() else _read_jsonl(partial_path) if resume else []
+    if identity_manifest_identities is not None and existing:
+        try:
+            existing_identities = []
+            for row in existing:
+                identity = (
+                    str(row.get("doc_id") or ""),
+                    str(row.get("content_hash") or ""),
+                )
+                model_run = row.get("model_run") if isinstance(row.get("model_run"), dict) else {}
+                if (
+                    identity not in identity_manifest_identities
+                    or model_run.get("prompt_version") != prompt_version
+                    or model_run.get("model") != model_id
+                ):
+                    raise ValueError("identity_manifest_resume_mismatch")
+                existing_identities.append(identity)
+            if len(existing_identities) != len(set(existing_identities)):
+                raise ValueError("duplicate_identity_in_resume_output")
+        except Exception as error:
+            _append_diagnostic(diagnostic_path, {
+                "event": "run_failed", "ts": _utc_now(), "stage": "resume_validation",
+                "exception_type": type(error).__name__,
+            })
+            raise
     completed = {
         _identity(row.get("doc_id", ""), row.get("content_hash", ""),
                   row.get("model_run", {}).get("prompt_version", ""), row.get("model_run", {}).get("model", ""))
@@ -765,7 +915,12 @@ def run_semantic_extraction(
     ordered_pending = _bucket_orders(pending, config.get("length_bucket_boundaries", [600, 1400]))
     _append_diagnostic(diagnostic_path, {
         "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
-        "orders_input": len(orders), "orders_pending": len(pending), "batch_size": batch_size,
+        "input_records_scanned": input_records_scanned,
+        "orders_input": len(orders),
+        "orders_pending": len(pending), "batch_size": batch_size,
+        "identity_manifest_enabled": bool(identity_manifest_path),
+        "identity_manifest_records": identity_manifest_records,
+        "ignored_invalid_input_records": ignored_invalid_input_records,
         "repair_batch_size": repair_batch_size,
         "max_new_tokens": int(config.get("max_new_tokens", 512)),
         "repair_max_new_tokens": int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))),
@@ -998,8 +1153,13 @@ def run_semantic_extraction(
         "chunked_prefill": bool(getattr(generator, "chunked_prefill", False)),
         "enforce_eager": bool(getattr(generator, "enforce_eager", False)),
         "config_hash": _config_hash(config),
+        "input_records_scanned": input_records_scanned,
         "orders_input": len(orders),
         "orders_processed": len(pending),
+        "identity_manifest_enabled": bool(identity_manifest_path),
+        "identity_manifest_records": identity_manifest_records,
+        "identity_manifest_sha256": identity_manifest_hash,
+        "ignored_invalid_input_records": ignored_invalid_input_records,
         "records_written": len(records),
         "rejects_written": len(rejects),
         "primary_requests": primary_requests,
@@ -1078,6 +1238,11 @@ def parse_args(argv=None):
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--retry-rejected", action="store_true")
     parser.add_argument("--doc-id-file")
+    parser.add_argument(
+        "--identity-manifest",
+        default="",
+        help="Exact sag_semantic_eval_manifest_v2 identities; mutually exclusive with --doc-id-file.",
+    )
     parser.add_argument("--diagnostic-log", default="")
     parser.add_argument(
         "--candidate-ledger", default="",
@@ -1106,6 +1271,8 @@ def main(argv=None):
         config["repair_batch_size"] = args.repair_batch_size
     if args.backend is not None:
         config["backend"] = args.backend
+    if args.doc_id_file and args.identity_manifest:
+        raise SystemExit("--doc-id-file and --identity-manifest are mutually exclusive")
     doc_ids = None
     if args.doc_id_file:
         doc_ids = [line.strip() for line in Path(args.doc_id_file).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -1113,6 +1280,7 @@ def main(argv=None):
         args.input, args.output, args.rejects, args.run_report, args.quality_report,
         args.model_path, config, limit=args.limit, resume=args.resume,
         retry_rejected=args.retry_rejected, doc_ids=doc_ids,
+        identity_manifest_path=args.identity_manifest or None,
         diagnostic_path=args.diagnostic_log or None,
         candidate_ledger_path=args.candidate_ledger or None,
         decision_ledger_path=args.decision_ledger or None,

@@ -167,16 +167,19 @@ PYTHONPATH=src python scripts/merge_adjudicated_gold.py \
 
 ## 5. 私有候选和决策账本
 
-服务器只在 Qwen 抽取事务内显式启用候选采集：
+服务器只在 Qwen 抽取事务内显式启用候选采集。评测样本必须使用本地冻结后私有传输到服务器的 v2 manifest，不能只传 doc_id：
 
 ```bash
+IDENTITY_MANIFEST=outputs/audit/eval.manifest.private.jsonl \
 CANDIDATE_LEDGER=outputs/audit/candidates.private.jsonl \
 DECISION_LEDGER=outputs/audit/decisions.private.jsonl \
-BACKEND=vllm LIMIT=32 BATCH_SIZE=32 \
+BACKEND=vllm BATCH_SIZE=32 \
   bash scripts/extract_semantics_qwen3_4b.sh
 ```
 
-candidate ledger 保存解析后、sanitation 前的结构化候选；不保存原始模型响应。decision ledger 保存 validator 前后状态、动作码和结构计数。两者是 append-only 的实际推理尝试历史，使用 `run_attempt_id + ledger_sequence` 区分崩溃恢复后的重跑；用于计算 gate 删除 precision 和修改 validator 后重放。推理结束后将 semantic、reject、ledger 和聚合报告通过私有通道复制回本地，服务器不承担后续画像、评测或 DuckDB 工作。
+`IDENTITY_MANIFEST` 只接受 `sag_semantic_eval_manifest_v2`，按 `(doc_id, content_hash)` 精确选择。启用后会完整扫描脱敏输入再筛选，因此 `LIMIT` 不截断源 JSONL；模型仍只处理 manifest 记录。与目标无关的无效源记录聚合计入 `ignored_invalid_input_records` 后跳过，目标记录本身无效则立即失败。manifest 重复 doc_id/identity、输入中目标 doc_id 重复、目标缺失、content hash 漂移，以及 resume 目录混入 manifest 外或不同 Prompt/model 的记录都会在模型调用前失败。run report 保存 manifest SHA-256、扫描/跳过/选择数量；隐私安全 diagnostics 不记录具体 identity。`DOC_ID_FILE` 仅保留给显式 reject retry，不能与 `IDENTITY_MANIFEST` 同时使用。
+
+candidate ledger 保存解析后、sanitation 前的结构化候选；不保存原始模型响应。decision ledger 保存 validator 前后状态、动作码和结构计数。两者是 append-only 的实际推理尝试历史，使用 `run_attempt_id + ledger_sequence` 区分崩溃恢复后的重跑；用于计算 gate 删除 precision 和修改 validator 后重放。运行结束后先执行 `scripts/check_semantic_run.py`；identity manifest 模式下 checker 会强制验证 manifest hash/count、扫描/跳过计数以及 semantic+reject 总数。随后将 semantic、reject、ledger 和聚合报告通过私有通道复制回本地，服务器不承担后续画像、评测或 DuckDB 工作。
 
 修改 validator 后，无需重跑 Qwen，在本地重放候选：
 
