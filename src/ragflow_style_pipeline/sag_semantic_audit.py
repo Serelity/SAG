@@ -224,10 +224,13 @@ def _payload_variants(order, max_input_chars):
 
 def _descriptor(order, semantic_index=None):
     content = _text(order.get("case_content_clean"))
-    goal = _text(order.get("case_goal_clean"))
-    searchable = "\n".join(value for value in (content, goal) if value)
+    searchable = "\n".join(
+        _text(order.get(field)) for field in CLEAN_FIELDS if _text(order.get(field))
+    )
     metadata = order.get("metadata") if isinstance(order.get("metadata"), dict) else {}
     flags = sorted(name for name, pattern in _PROXY_PATTERNS.items() if pattern.search(searchable))
+    if _text(order.get("address_detail_clean")):
+        flags.append("address_detail_present")
     if len([part for part in re.split(r"[。！？!?；;\n]+", content) if part.strip()]) >= 3:
         flags.append("multi_sentence_3plus")
     if semantic_index:

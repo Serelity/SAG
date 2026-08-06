@@ -91,6 +91,7 @@ class TestSemanticAudit(unittest.TestCase):
                 "doc_id": "order_secret_6",
                 "case_content_clean": "查询医保业务进度",
                 "case_goal_clean": "希望告知结果",
+                "address_detail_clean": "幸福路88号",
                 "metadata": {
                     "service_object_type": "咨询",
                     "type1": "民生保障",
@@ -151,6 +152,10 @@ class TestSemanticAudit(unittest.TestCase):
         self.assertTrue(any(row["challenge_reasons"] for row in first if row["subset"] == "challenge"))
         self.assertTrue(any(
             "rare_type3" in row["challenge_reasons"]
+            for row in first if row["subset"] == "challenge"
+        ))
+        self.assertTrue(any(
+            "address_detail_present" in row["challenge_reasons"]
             for row in first if row["subset"] == "challenge"
         ))
 
