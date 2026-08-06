@@ -36,6 +36,32 @@ class TestDocumentBuilder(unittest.TestCase):
         self.assertEqual(doc["metadata"]["call_month"], "2025-01")
         self.assertEqual(counts["phone"], 1)
 
+    def test_preserves_and_redacts_title_and_address_clean_fields(self):
+        phone = "139" + "0013" + "8000"
+        id_card = "320400" + "19900101" + "123" + "X"
+        row = {
+            "id": "11",
+            "order_id": "ORD011",
+            "title": "姓名：张三，反映办件问题",
+            "service_object_type": "求助",
+            "case_content": "服务对象反映路灯损坏",
+            "case_goal": "要求维修",
+            "address_detail": "人民路12号，联系电话" + phone + "，证件" + id_card,
+        }
+
+        doc, counts = build_document(row)
+
+        self.assertEqual(doc["title_clean"], "姓名：[姓名]，反映办件问题")
+        self.assertIn("联系电话[手机号]", doc["address_detail_clean"])
+        self.assertIn("证件[身份证号]", doc["address_detail_clean"])
+        self.assertIn("标题：姓名：[姓名]，反映办件问题", doc["display_text"])
+        self.assertIn("地址详情：人民路12号", doc["display_text"])
+        self.assertNotIn(phone, str(doc))
+        self.assertNotIn(id_card, str(doc))
+        self.assertEqual(counts["name"], 1)
+        self.assertEqual(counts["phone"], 1)
+        self.assertEqual(counts["id_card"], 1)
+
     def test_builds_multiview_document_fields(self):
         phone = "138" + "0013" + "8000"
         row = {
@@ -58,11 +84,13 @@ class TestDocumentBuilder(unittest.TestCase):
 
         doc, counts = build_document(row)
 
+        self.assertEqual(doc["title_clean"], "")
         self.assertEqual(
             doc["case_content_clean"],
             "市民反映手机号[手机号]附近有流动摊贩占道经营",
         )
         self.assertEqual(doc["case_goal_clean"], "希望执法部门清理流动摊贩")
+        self.assertEqual(doc["address_detail_clean"], "")
         self.assertEqual(
             doc["embedding_text"],
             (

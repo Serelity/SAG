@@ -27,6 +27,11 @@ def _join_non_empty(values, separator):
     return separator.join(value for value in values if value)
 
 
+def build_title(row):
+    """Return the normalized source-system title."""
+    return clean_value(row.get("title"))
+
+
 def build_case_content(row):
     """Return the normalized raw complaint/request content."""
     return clean_value(row.get("case_content"))
@@ -35,6 +40,11 @@ def build_case_content(row):
 def build_case_goal(row):
     """Return the normalized request goal."""
     return clean_value(row.get("case_goal"))
+
+
+def build_address_detail(row):
+    """Return the normalized free-text address detail."""
+    return clean_value(row.get("address_detail"))
 
 
 def build_embedding_text_from_parts(case_content, case_goal):
@@ -79,10 +89,14 @@ def build_display_text_from_parts(
     area,
     call_time,
     order_source,
+    title="",
+    address_detail="",
 ):
     """Create display text from already normalized or redacted parts."""
     lines = []
 
+    if title:
+        lines.append(f"标题：{title}")
     if service_object_type:
         lines.append(f"诉求类型：{service_object_type}")
     if case_content:
@@ -93,6 +107,8 @@ def build_display_text_from_parts(
         lines.append(f"业务分类：{category}")
     if area:
         lines.append(f"所属区域：{area}")
+    if address_detail:
+        lines.append(f"地址详情：{address_detail}")
     if call_time:
         lines.append(f"来电时间：{call_time}")
     if order_source:
@@ -111,6 +127,8 @@ def build_display_text(row):
         area=build_area(row),
         call_time=clean_value(row.get("call_time")),
         order_source=clean_value(row.get("order_source")),
+        title=build_title(row),
+        address_detail=build_address_detail(row),
     )
 
 
@@ -136,7 +154,6 @@ def build_metadata(row):
     """Create structured filters for one order row."""
     call_time = clean_value(row.get("call_time"))
     metadata = {
-        "order_id": clean_value(row.get("order_id")),
         "service_object_type": clean_value(row.get("service_object_type")),
         "area_code_city": clean_value(row.get("area_code_city")),
         "area_code_area": clean_value(row.get("area_code_area")),
@@ -167,11 +184,17 @@ def build_document(row):
     """Build one JSONL-ready multi-view RAG document and redaction statistics."""
     counts = Counter()
 
+    title, title_counts = redact_text(build_title(row))
+    counts.update(title_counts)
+
     case_content, case_content_counts = redact_text(build_case_content(row))
     counts.update(case_content_counts)
 
     case_goal, case_goal_counts = redact_text(build_case_goal(row))
     counts.update(case_goal_counts)
+
+    address_detail, address_detail_counts = redact_text(build_address_detail(row))
+    counts.update(address_detail_counts)
 
     display_parts = {}
     for key, value in {
@@ -193,6 +216,8 @@ def build_document(row):
         area=display_parts["area"],
         call_time=display_parts["call_time"],
         order_source=display_parts["order_source"],
+        title=title,
+        address_detail=address_detail,
     )
 
     embedding_text = build_embedding_text_from_parts(case_content, case_goal)
@@ -207,8 +232,10 @@ def build_document(row):
     return (
         {
             "doc_id": build_doc_id(row),
+            "title_clean": title,
             "case_content_clean": case_content,
             "case_goal_clean": case_goal,
+            "address_detail_clean": address_detail,
             "embedding_text": embedding_text,
             "display_text": display_text,
             "text": display_text,

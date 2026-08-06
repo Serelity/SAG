@@ -27,12 +27,27 @@
 
 除 Qwen 推理外，画像、抽样、标注、验证、重放、Oracle 投影和 SAG 评估都在本地完成。真实 TSV 应优先在本地脱敏导出；如果当前版脱敏 multiview 只存在服务器，则通过私有通道复制到仓库外的本地私有目录。不要把旧版本地代理画像表述为当前生产画像。
 
-本地运行示例：
+当前本机原始 TSV 位于 `G:\\12345_pro_promax\\data\\t_order_master.tsv`；WSL/Git Bash 对应 `/g/12345_pro_promax/data/t_order_master.tsv`。脱敏导出、检查、画像和标注均在本机运行，不要为这些步骤连接服务器：
 
 ```bash
-PRIVATE_ROOT=/path/outside/repository/sag-private/current-v1
-INPUT_JSONL="$PRIVATE_ROOT/t_order_master.100k.multiview.jsonl"
-mkdir -p "$PRIVATE_ROOT/audit"
+PRIVATE_ROOT=/g/RAG/SAG_private/semantic-eval/current-v1
+INPUT_JSONL="$PRIVATE_ROOT/input/t_order_master.100k.multiview.private.jsonl"
+mkdir -p "$PRIVATE_ROOT/input" "$PRIVATE_ROOT/audit"
+
+PYTHONPATH=src python -m ragflow_style_pipeline.export_jsonl \
+  --input /g/12345_pro_promax/data/t_order_master.tsv \
+  --output "$INPUT_JSONL" \
+  --quality-report "$PRIVATE_ROOT/input/t_order_master.100k.quality.safe.json" \
+  --limit 100000
+
+PYTHONPATH=src python -m ragflow_style_pipeline.scan_jsonl_safety \
+  --input "$INPUT_JSONL" \
+  --output "$PRIVATE_ROOT/input/t_order_master.100k.safety.safe.json"
+
+PYTHONPATH=src python scripts/check_multiview_export.py \
+  --input "$INPUT_JSONL" \
+  --quality-report "$PRIVATE_ROOT/input/t_order_master.100k.quality.safe.json" \
+  --output "$PRIVATE_ROOT/input/t_order_master.100k.check.safe.json"
 
 PYTHONPATH=src python scripts/profile_semantic_input.py \
   --input "$INPUT_JSONL" \
@@ -40,6 +55,8 @@ PYTHONPATH=src python scripts/profile_semantic_input.py \
   --max-input-chars 2200 \
   --head-size 32
 ```
+
+`input_schema=sag_multiview_input_v2` 明确输出 `title_clean/case_content_clean/case_goal_clean/address_detail_clean`，每条记录携带按四个 clean fields 与 metadata 计算的稳定 `content_hash`。源 `metadata.order_id` 不进入脱敏 JSONL；工单身份使用脱敏 `doc_id`，从原 TSV 直接建 SAG 时仍可计算 `order_id_hash`。四字段全空记录在导出阶段聚合跳过，不再留给推理 adapter 拒绝。quality report 保存输出 bytes/SHA-256；checker 验证 schema、四字段、hash、doc_id/identity 唯一性与 quality provenance，且只输出聚合信息。
 
 报告只含聚合数字。词法 proxy 仅用于抽样，不是 gold，不能将 `road_form`、`semantic_gap` 或情绪触发词数量解释为真实 precision/recall。
 
