@@ -8,6 +8,7 @@ from ragflow_style_pipeline.sag_semantic_audit import (
     build_private_annotation_packet,
     compare_gold_annotations,
     evaluate_semantic_gold,
+    merge_adjudicated_gold,
     profile_semantic_input,
     project_gold_issues,
     replay_candidate_ledger,
@@ -329,6 +330,99 @@ class TestSemanticAudit(unittest.TestCase):
         self.assertEqual(conflicts[0]["doc_id"], "annotation-secret-1")
         self.assertTrue(conflicts[0]["private"])
         self.assertEqual(conflicts[0]["adjudication"]["status"], "pending")
+
+    def test_adjudication_merge_requires_explicit_untampered_resolution(self):
+        exact_left = self._completed_annotation("annotator-a")
+        exact_left["manifest_provenance"]["records"] = 2
+        conflict_left = self._completed_annotation("annotator-a")
+        conflict_left["doc_id"] = "annotation-secret-2"
+        conflict_left["content_hash"] = "sha256:annotation-2"
+        conflict_left["manifest_provenance"]["records"] = 2
+        exact_right = json.loads(json.dumps(exact_left, ensure_ascii=False))
+        exact_right["annotation"]["annotator"] = "annotator-b"
+        conflict_right = json.loads(json.dumps(conflict_left, ensure_ascii=False))
+        conflict_right["annotation"]["annotator"] = "annotator-b"
+        conflict_right["issues"][0]["locations"] = []
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            left_path = root / "left.private.jsonl"
+            right_path = root / "right.private.jsonl"
+            conflicts_path = root / "conflicts.private.jsonl"
+            left_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in (
+                    exact_left, conflict_left
+                )), encoding="utf-8",
+            )
+            right_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in (
+                    exact_right, conflict_right
+                )), encoding="utf-8",
+            )
+            _agreement, conflicts = compare_gold_annotations(
+                left_path, right_path,
+                left_annotator="annotator-a", right_annotator="annotator-b",
+            )
+            decision = conflicts[0]["adjudication"]
+            decision.update({
+                "status": "resolved",
+                "adjudicator": "referee",
+                "issues": conflict_left["issues"],
+                "declared_intents": conflict_left["declared_intents"],
+                "direct_emotions": conflict_left["direct_emotions"],
+                "satisfaction": conflict_left["satisfaction"],
+                "urgency": conflict_left["urgency"],
+                "notes": "manual resolution",
+            })
+            conflicts_path.write_text(
+                json.dumps(conflicts[0], ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            without_notes = json.loads(json.dumps(conflicts[0], ensure_ascii=False))
+            without_notes["adjudication"]["notes"] = ""
+            conflicts_path.write_text(
+                json.dumps(without_notes, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "conflict_resolution_missing_notes"):
+                merge_adjudicated_gold(
+                    left_path, right_path, conflicts_path, adjudicator="referee"
+                )
+            conflicts_path.write_text(
+                json.dumps(conflicts[0], ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "adjudicator_not_independent"):
+                merge_adjudicated_gold(
+                    left_path, right_path, conflicts_path, adjudicator="annotator-a"
+                )
+            rows, report = merge_adjudicated_gold(
+                left_path, right_path, conflicts_path,
+                adjudicator="referee",
+                left_annotator="annotator-a", right_annotator="annotator-b",
+            )
+            final_path = root / "gold.private.jsonl"
+            final_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            validation = validate_gold_annotations(
+                final_path, require_complete=True, expected_annotator="referee"
+            )
+            tampered = json.loads(json.dumps(conflicts[0], ensure_ascii=False))
+            tampered["clean_fields"]["case_content_clean"] = "tampered"
+            conflicts_path.write_text(
+                json.dumps(tampered, ensure_ascii=False) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "conflict_source_payload_changed"):
+                merge_adjudicated_gold(
+                    left_path, right_path, conflicts_path, adjudicator="referee"
+                )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(report["exact_agreements"], 1)
+        self.assertEqual(report["resolved_conflicts"], 1)
+        self.assertTrue(validation["ready_for_evaluation"])
+        self.assertEqual({row["annotation"]["status"] for row in rows}, {"adjudicated"})
+        self.assertEqual(
+            {row["adjudication_provenance"]["resolution"] for row in rows},
+            {"exact_agreement", "explicit_conflict"},
+        )
 
     def test_candidate_replay_selects_latest_attempt_without_invoking_model(self):
         order_document = {

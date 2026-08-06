@@ -11,6 +11,7 @@ from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import _semantic_payload
 from ragflow_style_pipeline.sag_semantic_versions import (
+    ADJUDICATION_MERGE_VERSION,
     ANNOTATION_AGREEMENT_VERSION,
     EVAL_MANIFEST_VERSION,
     EVALUATION_VERSION,
@@ -857,13 +858,15 @@ def _agreement_counts(left, right):
     }
 
 
-def _private_conflict_row(left, right, reasons):
+def _private_conflict_row(left, right, reasons, source_provenance):
     return {
         "schema": ANNOTATION_AGREEMENT_VERSION,
         "private": True,
         "doc_id": left.get("doc_id", ""),
         "content_hash": left.get("content_hash", ""),
         "subset": left.get("subset", ""),
+        "manifest_provenance": left.get("manifest_provenance", {}),
+        "source_provenance": source_provenance,
         "clean_fields": left.get("clean_fields", {}),
         "metadata": left.get("metadata", {}),
         "conflict_reasons": sorted(reasons),
@@ -884,6 +887,11 @@ def _private_conflict_row(left, right, reasons):
         "adjudication": {
             "status": "pending",
             "adjudicator": "",
+            "issues": [],
+            "declared_intents": [],
+            "direct_emotions": [],
+            "satisfaction": {"label": "unknown", "target": "", "evidence": ""},
+            "urgency": {"level": "normal", "evidence": ""},
             "notes": "",
         },
     }
@@ -922,6 +930,12 @@ def compare_gold_annotations(left_path, right_path, left_annotator="", right_ann
     if left_annotators == right_annotators:
         raise ValueError("annotators_not_distinct")
 
+    source_provenance = {
+        "schema": ANNOTATION_AGREEMENT_VERSION,
+        "gold_schema": GOLD_SCHEMA_VERSION,
+        "left_sha256": _file_sha256(left_path),
+        "right_sha256": _file_sha256(right_path),
+    }
     shared = sorted(left_index.keys() & right_index.keys())
     issue_counts = Counter()
     mention_counts = Counter()
@@ -970,7 +984,9 @@ def compare_gold_annotations(left_path, right_path, left_annotator="", right_ann
             exact_records += 1
         else:
             reason_counts.update(reasons)
-            conflicts.append(_private_conflict_row(left, right, reasons))
+            conflicts.append(_private_conflict_row(
+                left, right, reasons, source_provenance
+            ))
 
     def aggregate(counts):
         matched = counts["matched"]
@@ -987,6 +1003,7 @@ def compare_gold_annotations(left_path, right_path, left_annotator="", right_ann
         "schema": ANNOTATION_AGREEMENT_VERSION,
         "gold_schema": GOLD_SCHEMA_VERSION,
         "private_inputs": True,
+        "source_provenance": source_provenance,
         "left_records": len(left_index),
         "right_records": len(right_index),
         "shared_records": shared_count,
@@ -1007,6 +1024,140 @@ def compare_gold_annotations(left_path, right_path, left_annotator="", right_ann
         "right_validation": right_validation,
     }
     return report, conflicts
+
+
+def merge_adjudicated_gold(
+    left_path,
+    right_path,
+    conflicts_path,
+    adjudicator,
+    left_annotator="",
+    right_annotator="",
+):
+    """Merge exact agreements and explicitly resolved conflicts into final gold."""
+    adjudicator = _text(adjudicator).strip()
+    if not adjudicator:
+        raise ValueError("missing_adjudicator")
+    agreement, expected_conflicts = compare_gold_annotations(
+        left_path,
+        right_path,
+        left_annotator=left_annotator,
+        right_annotator=right_annotator,
+    )
+    left_rows, _ = _load_annotation_rows(left_path)
+    right_rows, _ = _load_annotation_rows(right_path)
+    provided_conflicts, parse_errors = _load_annotation_rows(conflicts_path)
+    if parse_errors:
+        raise ValueError("invalid_conflict_jsonl")
+
+    def index(rows, label):
+        values = {}
+        for row in rows:
+            identity = (_text(row.get("doc_id")), _text(row.get("content_hash")))
+            if not all(identity) or identity in values:
+                raise ValueError(f"invalid_or_duplicate_{label}_identity")
+            values[identity] = row
+        return values
+
+    left_index = index(left_rows, "left")
+    right_index = index(right_rows, "right")
+    expected_index = index(expected_conflicts, "expected_conflict")
+    provided_index = index(provided_conflicts, "provided_conflict")
+    if expected_index.keys() != provided_index.keys():
+        raise ValueError("conflict_identity_sets_differ")
+
+    left_name = next(iter({
+        _text(row.get("annotation", {}).get("annotator")) for row in left_rows
+    }))
+    right_name = next(iter({
+        _text(row.get("annotation", {}).get("annotator")) for row in right_rows
+    }))
+    if adjudicator in {left_name, right_name}:
+        raise ValueError("adjudicator_not_independent")
+    final_rows = []
+    for identity, left in left_index.items():
+        right = right_index[identity]
+        if identity not in expected_index:
+            semantic = {
+                key: left.get(key)
+                for key in (
+                    "issues", "declared_intents", "direct_emotions",
+                    "satisfaction", "urgency",
+                )
+            }
+            notes = "exact_double_annotation_agreement"
+        else:
+            expected = expected_index[identity]
+            provided = provided_index[identity]
+            immutable_keys = (
+                "schema", "private", "doc_id", "content_hash", "subset",
+                "manifest_provenance", "source_provenance", "clean_fields",
+                "metadata", "conflict_reasons", "left", "right",
+            )
+            if any(provided.get(key) != expected.get(key) for key in immutable_keys):
+                raise ValueError("conflict_source_payload_changed")
+            decision = provided.get("adjudication")
+            if not isinstance(decision, dict) or decision.get("status") != "resolved":
+                raise ValueError("conflict_not_resolved")
+            if _text(decision.get("adjudicator")) != adjudicator:
+                raise ValueError("conflict_adjudicator_mismatch")
+            if not _text(decision.get("notes")).strip():
+                raise ValueError("conflict_resolution_missing_notes")
+            semantic = {
+                key: decision.get(key)
+                for key in (
+                    "issues", "declared_intents", "direct_emotions",
+                    "satisfaction", "urgency",
+                )
+            }
+            notes = _text(decision.get("notes"))
+
+        final = {
+            "schema": GOLD_SCHEMA_VERSION,
+            "private": True,
+            "subset": left.get("subset", ""),
+            "doc_id": identity[0],
+            "content_hash": identity[1],
+            "manifest_provenance": left.get("manifest_provenance", {}),
+            "clean_fields": left.get("clean_fields", {}),
+            "metadata": left.get("metadata", {}),
+            **semantic,
+            "annotation": {
+                "annotator": adjudicator,
+                "status": "adjudicated",
+                "notes": notes,
+            },
+            "adjudication_provenance": {
+                "schema": ADJUDICATION_MERGE_VERSION,
+                "left_annotator": left_name,
+                "right_annotator": right_name,
+                "left_sha256": agreement["source_provenance"]["left_sha256"],
+                "right_sha256": agreement["source_provenance"]["right_sha256"],
+                "conflicts_sha256": _file_sha256(conflicts_path),
+                "resolution": "explicit_conflict" if identity in expected_index else "exact_agreement",
+            },
+        }
+        errors, _warnings = _validate_gold_row(
+            final, require_complete=True, expected_annotator=adjudicator
+        )
+        if errors:
+            raise ValueError("invalid_adjudicated_record:" + sorted(errors)[0])
+        final_rows.append(final)
+
+    report = {
+        "schema": ADJUDICATION_MERGE_VERSION,
+        "gold_schema": GOLD_SCHEMA_VERSION,
+        "private_inputs": True,
+        "records": len(final_rows),
+        "exact_agreements": len(final_rows) - len(expected_index),
+        "resolved_conflicts": len(expected_index),
+        "agreement_source_sha256": {
+            "left": agreement["source_provenance"]["left_sha256"],
+            "right": agreement["source_provenance"]["right_sha256"],
+        },
+        "conflicts_source_sha256": _file_sha256(conflicts_path),
+    }
+    return final_rows, report
 
 
 def _read_semantic_index(path):

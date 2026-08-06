@@ -147,7 +147,23 @@ PYTHONPATH=src python scripts/compare_semantic_annotations.py \
   --conflicts "$PRIVATE_ROOT/audit/eval.conflicts.private.jsonl"
 ```
 
-一致率用于发现指南歧义，不设脱离数据的固定通过阈值。先审阅 `issue_frame`、`issue_attachment` 和 history/current 冲突，再由第三人仲裁生成唯一 adjudicated gold；不得通过多数投票自动合并 evidence 或 issue 边。
+一致率用于发现指南歧义，不设脱离数据的固定通过阈值。先审阅 `issue_frame`、`issue_attachment` 和 history/current 冲突，再由第三人仲裁；不得通过多数投票自动合并 evidence 或 issue 边。冲突包中的 `left/right/clean_fields/source_provenance` 不可修改，只在 `adjudication` 中填写完整最终 `issues/declared_intents/direct_emotions/satisfaction/urgency`，将状态改为 `resolved` 并填写非空说明。仲裁者必须不同于 A/B 标注者。
+
+所有冲突解决后，在本地生成唯一 final gold：
+
+```bash
+PYTHONPATH=src python scripts/merge_adjudicated_gold.py \
+  --left "$PRIVATE_ROOT/audit/eval.annotator-a.private.jsonl" \
+  --right "$PRIVATE_ROOT/audit/eval.annotator-b.private.jsonl" \
+  --conflicts "$PRIVATE_ROOT/audit/eval.conflicts.private.jsonl" \
+  --left-annotator annotator-a \
+  --right-annotator annotator-b \
+  --adjudicator referee \
+  --output "$PRIVATE_ROOT/audit/eval.gold.private.jsonl" \
+  --report "$PRIVATE_ROOT/audit/eval.adjudication.safe.json"
+```
+
+合并器会重新计算 A/B 一致性，核对输入文件 hash、完整冲突身份集和冲突原始内容；一致记录确定性进入 final gold，冲突记录只能采用显式仲裁结果。输出再执行 gold v2 的文件级 provenance、enum、field/evidence 和 issue grounding 验证。
 
 ## 5. 私有候选和决策账本
 
