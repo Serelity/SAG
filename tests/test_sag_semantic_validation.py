@@ -224,6 +224,278 @@ class TestSemanticValidation(unittest.TestCase):
             validate_semantic_output(order, fact)["warnings"],
         )
 
+    def test_synthesizes_only_verified_two_road_intersection(self):
+        order = dict(
+            self.order,
+            case_content_clean="人民路与花东街交叉口有乱摆摊",
+        )
+        semantic = semantic_with("problem_behaviors", {
+            "surface":"乱摆摊", "canonical":"乱摆摊",
+            "source_field":"case_content_clean", "evidence":"乱摆摊",
+        })
+        semantic["entities"]["roads"] = [
+            {
+                "surface":"人民路", "canonical":"人民路",
+                "source_field":"case_content_clean", "evidence":"人民路",
+            },
+            {
+                "surface":"花东街", "canonical":"花东街",
+                "source_field":"case_content_clean", "evidence":"花东街",
+            },
+        ]
+        enriched, actions = enrich_semantic_output(order, semantic)
+        self.assertEqual(enriched["entities"]["intersections"], [{
+            "surface":"人民路与花东街交叉口",
+            "canonical":"人民路与花东街交叉口",
+            "source_field":"case_content_clean",
+            "evidence":"人民路与花东街交叉口",
+        }])
+        self.assertIn("synthesized_intersection:entities.intersections.0", actions)
+        validation = validate_semantic_output(order, enriched)
+        self.assertEqual(validation["status"], "accepted_with_warnings")
+        self.assertIn("semantic_gap:problem_objects", validation["warnings"])
+
+        one_road = dict(order, case_content_clean="劳动东路北侧往污水厂交叉口侧石破损")
+        semantic["entities"]["roads"] = [{
+            "surface":"劳动东路", "canonical":"劳动东路",
+            "source_field":"case_content_clean", "evidence":"劳动东路",
+        }]
+        enriched, _ = enrich_semantic_output(one_road, semantic)
+        self.assertEqual(enriched["entities"]["intersections"], [])
+
+        two_roads_without_junction = dict(order, case_content_clean="车辆从人民路驶向花东街")
+        semantic["entities"]["roads"] = [
+            {
+                "surface":"人民路", "canonical":"人民路",
+                "source_field":"case_content_clean", "evidence":"人民路",
+            },
+            {
+                "surface":"花东街", "canonical":"花东街",
+                "source_field":"case_content_clean", "evidence":"花东街",
+            },
+        ]
+        enriched, _ = enrich_semantic_output(two_roads_without_junction, semantic)
+        self.assertEqual(enriched["entities"]["intersections"], [])
+
+    def test_drops_admin_division_and_bare_address_pois(self):
+        order = dict(
+            self.order,
+            case_content_clean="金坛区薛埠镇东环路37号鑫城汽修厂涉嫌垄断",
+        )
+        semantic = semantic_with("pois", {
+            "surface":"薛埠镇", "canonical":"薛埠镇",
+            "source_field":"case_content_clean", "evidence":"薛埠镇",
+        })
+        semantic["entities"]["pois"].extend([
+            {
+                "surface":"东环路37号", "canonical":"东环路37号",
+                "source_field":"case_content_clean", "evidence":"东环路37号",
+            },
+            {
+                "surface":"鑫城汽修厂", "canonical":"鑫城汽修厂",
+                "source_field":"case_content_clean", "evidence":"鑫城汽修厂",
+            },
+        ])
+        validation = validate_semantic_output(order, semantic)
+        self.assertIn("poi_shape_conflict:entities.pois.0", validation["warnings"])
+        self.assertIn("poi_shape_conflict:entities.pois.1", validation["warnings"])
+        cleaned, actions = sanitize_semantic_output(semantic, validation["warnings"], order=order)
+        self.assertEqual(
+            [item["canonical"] for item in cleaned["entities"]["pois"]],
+            ["鑫城汽修厂"],
+        )
+        self.assertIn("dropped_invalid_candidate:entities.pois.0", actions)
+        self.assertIn("dropped_invalid_candidate:entities.pois.1", actions)
+
+        order["case_content_clean"] += "；路劲城小区物业问题"
+        semantic["entities"]["pois"] = [{
+            "surface":"路劲城小区", "canonical":"路劲城小区",
+            "source_field":"case_content_clean", "evidence":"路劲城小区",
+        }]
+        self.assertNotIn(
+            "poi_shape_conflict:entities.pois.0",
+            validate_semantic_output(order, semantic)["warnings"],
+        )
+
+    def test_recovers_single_named_road_from_direction_or_address(self):
+        order = dict(
+            self.order,
+            case_content_clean="河海西路复康路方向车辆占道；东环路37号鑫城汽修厂",
+        )
+        semantic = semantic_with("roads", {
+            "surface":"复康路方向", "canonical":"复康路方向",
+            "source_field":"case_content_clean", "evidence":"河海西路复康路方向",
+        })
+        semantic["entities"]["roads"].extend([
+            {
+                "surface":"东环路37号", "canonical":"东环路37号",
+                "source_field":"case_content_clean", "evidence":"东环路37号",
+            },
+            {
+                "surface":"一路顺风有限公司", "canonical":"一路顺风有限公司",
+                "source_field":"case_content_clean", "evidence":"一路顺风有限公司",
+            },
+        ])
+        order["case_content_clean"] += "；一路顺风有限公司"
+        enriched, actions = enrich_semantic_output(order, semantic)
+        self.assertEqual(
+            [item["canonical"] for item in enriched["entities"]["roads"]],
+            ["复康路", "东环路", "一路顺风有限公司"],
+        )
+        self.assertIn("recovered_named_road:entities.roads.0", actions)
+        self.assertIn("recovered_named_road:entities.roads.1", actions)
+        self.assertNotIn("recovered_named_road:entities.roads.2", actions)
+
+    def test_filters_normal_service_actions_but_keeps_observed_failure(self):
+        cases = (
+            ("咨询办理", "咨询办理"),
+            ("注册有限责任公司", "注册有限责任公司"),
+            ("希望转入盲童学校", "希望转入盲童学校"),
+        )
+        for evidence, canonical in cases:
+            with self.subTest(evidence=evidence):
+                order = dict(self.order, case_content_clean=evidence, case_goal_clean=evidence)
+                semantic = semantic_with("problem_behaviors", {
+                    "surface":evidence, "canonical":canonical,
+                    "source_field":"case_content_clean", "evidence":evidence,
+                })
+                result = validate_semantic_output(order, semantic)
+                self.assertTrue(any(
+                    warning.startswith((
+                        "normal_service_action_as_behavior:",
+                        "request_action_as_behavior:",
+                    ))
+                    for warning in result["warnings"]
+                ))
+
+        observed_cases = (
+            ("现在确按照湖南的系数给我办理退休", "按湖南系数办理退休"),
+            ("网上办理失败", "办理失败"),
+            ("公司注册受阻", "注册受阻"),
+            ("窗口拒绝办理", "拒绝办理"),
+            ("申请一直不通过", "申请不通过"),
+        )
+        for observed, canonical in observed_cases:
+            with self.subTest(observed=observed):
+                order = dict(
+                    self.order,
+                    case_content_clean=observed,
+                    case_goal_clean="要求按常州政策办理",
+                )
+                semantic = semantic_with("problem_behaviors", {
+                    "surface":observed, "canonical":canonical,
+                    "source_field":"case_content_clean", "evidence":observed,
+                })
+                self.assertFalse(any(
+                    warning.startswith((
+                        "normal_service_action_as_behavior:",
+                        "request_action_as_behavior:",
+                    ))
+                    for warning in validate_semantic_output(order, semantic)["warnings"]
+                ))
+
+    def test_rejects_unsupported_canonical_state_and_deduplicates_variants(self):
+        order = dict(self.order, case_content_clean="皮蛋属于三无食品；严重影响自己家的采光")
+        semantic = semantic_with("problem_behaviors", {
+            "surface":"三无食品", "canonical":"销售过期食品",
+            "source_field":"case_content_clean", "evidence":"三无食品",
+        })
+        result = validate_semantic_output(order, semantic)
+        self.assertIn("canonical_evidence_conflict:entities.problem_behaviors.0", result["warnings"])
+
+        semantic["entities"]["problem_behaviors"] = [
+            {
+                "surface":"严重影响自己家的采光", "canonical":"严重影响采光",
+                "source_field":"case_content_clean", "evidence":"严重影响自己家的采光",
+            },
+            {
+                "surface":"严重影响自己家的采光", "canonical":"严重影响自己家的采光",
+                "source_field":"case_content_clean", "evidence":"严重影响自己家的采光",
+            },
+        ]
+        enriched, actions = enrich_semantic_output(order, semantic)
+        self.assertEqual(len(enriched["entities"]["problem_behaviors"]), 1)
+        self.assertEqual(
+            enriched["entities"]["problem_behaviors"][0]["canonical"],
+            "严重影响采光",
+        )
+        self.assertIn("deduplicated_entity_variant:entities.problem_behaviors.1", actions)
+
+    def test_keeps_one_reliable_intent_and_replaces_weak_help_label(self):
+        order = dict(self.order, case_content_clean="服务对象投诉商家违法，要求查处")
+        semantic = semantic_with("problem_objects", {
+            "surface":"商家", "canonical":"商家",
+            "source_field":"case_content_clean", "evidence":"商家",
+        })
+        semantic["discourse"]["intents"] = [{"label":"求助", "evidence":"要求"}]
+        enriched, actions = enrich_semantic_output(order, semantic)
+        self.assertEqual(enriched["discourse"]["intents"], [{"label":"投诉", "evidence":"投诉"}])
+        self.assertIn("replaced_weak_intent:投诉", actions)
+
+        order["case_content_clean"] = "服务对象建议加强培训，同时咨询长途客车处理方式"
+        semantic["discourse"]["intents"] = [
+            {"label":"求助", "evidence":"要求"},
+            {"label":"建议", "evidence":"建议"},
+        ]
+        enriched, _ = enrich_semantic_output(order, semantic)
+        self.assertEqual(enriched["discourse"]["intents"], [{"label":"建议", "evidence":"建议"}])
+
+    def test_requires_direct_emotion_and_satisfaction_evidence(self):
+        order = dict(self.order, case_content_clean="公司威胁不给工资，服务对象要求处理")
+        semantic = semantic_with("problem_behaviors", {
+            "surface":"威胁不给工资", "canonical":"拖欠工资",
+            "source_field":"case_content_clean", "evidence":"威胁不给工资",
+        })
+        semantic["discourse"]["emotions"] = [{
+            "label":"不满", "intensity":2, "evidence":"威胁不给",
+        }]
+        semantic["discourse"]["satisfaction"] = {
+            "label":"dissatisfied", "target":"公司", "evidence":"不给",
+        }
+        validation = validate_semantic_output(order, semantic)
+        self.assertIn("unsupported_emotion_evidence:discourse.emotions.0", validation["warnings"])
+        self.assertIn("unsupported_satisfaction_evidence", validation["warnings"])
+        cleaned, _ = sanitize_semantic_output(semantic, validation["warnings"], order=order)
+        self.assertEqual(cleaned["discourse"]["emotions"], [])
+        self.assertEqual(cleaned["discourse"]["satisfaction"]["label"], "unknown")
+
+        direct_order = dict(self.order, case_content_clean="服务对象对此不满意，其不认可处理结果")
+        semantic["discourse"]["emotions"] = [{
+            "label":"不满", "intensity":2, "evidence":"服务对象对此不满意",
+        }]
+        semantic["discourse"]["satisfaction"] = {
+            "label":"dissatisfied", "target":"处理结果", "evidence":"其不认可",
+        }
+        validation = validate_semantic_output(direct_order, semantic)
+        self.assertNotIn("unsupported_emotion_evidence:discourse.emotions.0", validation["warnings"])
+        self.assertNotIn("unsupported_satisfaction_evidence", validation["warnings"])
+
+        semantic["discourse"]["emotions"] = [{
+            "label":"认可", "intensity":2, "evidence":"不认可",
+        }]
+        semantic["discourse"]["satisfaction"] = {
+            "label":"satisfied", "target":"处理结果", "evidence":"不认可",
+        }
+        validation = validate_semantic_output(direct_order, semantic)
+        self.assertIn("unsupported_emotion_evidence:discourse.emotions.0", validation["warnings"])
+        self.assertIn("unsupported_satisfaction_evidence", validation["warnings"])
+
+    def test_semantic_gap_warnings_are_audit_only(self):
+        order = dict(
+            self.order,
+            case_content_clean="天宁区政务服务中心疑似有人盗用手机号办理医保业务",
+        )
+        semantic = semantic_with("problem_objects", {
+            "surface":"手机号", "canonical":"手机号",
+            "source_field":"case_content_clean", "evidence":"手机号",
+        })
+        semantic["entities"]["problem_objects"] = []
+        result = validate_semantic_output(order, semantic)
+        self.assertIn("semantic_gap:problem_objects", result["warnings"])
+        self.assertIn("semantic_gap:problem_behaviors", result["warnings"])
+        self.assertIn("semantic_gap:pois", result["warnings"])
+        self.assertEqual(result["status"], "accepted_with_warnings")
+
     def test_detects_canonical_target_conflict_and_invalid_satisfaction_target(self):
         order = dict(self.order, case_content_clean="严重影响自己家的采光，其不认可")
         semantic = semantic_with("problem_behaviors", {

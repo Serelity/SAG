@@ -160,7 +160,7 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         },
         "model_run": {
             "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
-            "prompt_version": str(config.get("prompt_version", "sag_semantic_v6")),
+            "prompt_version": str(config.get("prompt_version", "sag_semantic_v7")),
             "backend": str(config.get("backend", "transformers")),
             "input_tokens": generation["input_tokens"],
             "output_tokens": generation["output_tokens"],
@@ -580,6 +580,15 @@ def _quality_report(records, rejects):
             for row in records for group in ENTITY_GROUPS for item in row.get("entities", {}).get(group, [])
         ),
         "intent_conflict_count": 0,
+        "json_recovery_count": sum(
+            count for warning, count in warning_counts.items()
+            if warning.startswith("json_recovered_")
+        ),
+        "semantic_gap_counts": {
+            warning.split(":", 1)[1]: count
+            for warning, count in warning_counts.items()
+            if warning.startswith("semantic_gap:")
+        },
         "template_politeness_warning_count": warning_counts.get("template_politeness_as_satisfaction", 0),
     }
 
@@ -595,7 +604,7 @@ def run_semantic_extraction(
     started_at = _utc_now()
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
-    prompt_version = str(config.get("prompt_version", "sag_semantic_v6"))
+    prompt_version = str(config.get("prompt_version", "sag_semantic_v7"))
     backend = str(config.get("backend", "transformers")).strip().lower()
     output_path = Path(output_path)
     rejects_path = Path(rejects_path)

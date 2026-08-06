@@ -70,6 +70,61 @@ class TestSemanticLlm(unittest.TestCase):
         self.assertTrue(record["validation"]["repair_attempted"])
         self.assertEqual(record["entities"]["pois"][0]["canonical"], "港龙新港城")
 
+    def test_complete_safe_json_recovery_does_not_consume_model_repair(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)
+
+            class TrailingCommaGenerator:
+                def __init__(self): self.calls = 0
+                def __call__(self, prompts, max_new_tokens, temperature):
+                    self.calls += 1
+                    text = json.dumps({
+                        "event_summary":"市民反映港龙新港城北门有摊贩占道",
+                        "entities":{
+                            "problem_objects":[{
+                                "surface":"摊贩", "canonical":"流动摊贩",
+                                "field":"case_content_clean", "evidence":"摊贩",
+                            }],
+                            "problem_behaviors":[{
+                                "surface":"占道", "canonical":"占道经营",
+                                "field":"case_content_clean", "evidence":"占道",
+                            }],
+                            "roads":[], "intersections":[],
+                            "pois":[{
+                                "surface":"港龙新港城", "canonical":"港龙新港城",
+                                "field":"case_content_clean", "evidence":"港龙新港城",
+                            }],
+                        },
+                        "discourse":{
+                            "intents":[], "emotions":[],
+                            "satisfaction":{"label":"unknown", "target":"", "evidence":""},
+                            "urgency":{"level":"normal", "evidence":""},
+                        },
+                    }, ensure_ascii=False)
+                    text = text[:-1] + ",}"
+                    return [{
+                        "text":text, "input_tokens":100, "output_tokens":80,
+                        "finish_reason":"stop", "latency_ms":1,
+                    } for _ in prompts]
+
+            generator = TrailingCommaGenerator()
+            report = run_semantic_extraction(
+                source, tmp/"semantic.jsonl", tmp/"rejects.jsonl", tmp/"run.json", tmp/"quality.json", "unused",
+                {
+                    "model_id":"Qwen/Qwen3-4B", "prompt_version":"sag_semantic_v7",
+                    "batch_size":1, "checkpoint_every":1,
+                },
+                generator=generator,
+            )
+            record = json.loads((tmp/"semantic.jsonl").read_text(encoding="utf-8"))
+            quality = json.loads((tmp/"quality.json").read_text(encoding="utf-8"))
+        self.assertEqual(generator.calls, 1)
+        self.assertEqual(report["repair_requests"], 0)
+        self.assertEqual(record["validation"]["status"], "accepted_with_warnings")
+        self.assertIn("json_recovered_trailing_comma", record["validation"]["warnings"])
+        self.assertEqual(quality["json_recovery_count"], 1)
+        self.assertEqual(quality["semantic_gap_counts"], {})
+
     def test_invalid_optional_candidate_is_dropped_without_repair(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)

@@ -288,9 +288,9 @@ _FEW_SHOTS = """六个跨领域边界示例：
 _COMPACT_RULES = """你是面向 SAG 检索的 12345 工单语义结构化器，对任意领域做开放式识别。只输出紧凑单行 JSON。
 输入字段：title_clean、case_content_clean、case_goal_clean、address_detail_clean。input_window_info 和 metadata_context 仅作背景，绝不能作为 field/evidence，且不能覆盖正文当前事实。
 event_summary：完整概括当前事件和诉求，不编造；历史答复不得覆盖“不认可、仍未解决、再次要求”等当前立场。
-实体：problem_objects 是具体领域对象，咨询许可证、注册、就学、查询等也要提取被咨询对象；只要正文明确描述对象正在发生的问题现象/异常状态，就提取 problem_behaviors，不能只提对象而漏掉行为。希望/要求退款、销课、注销、恢复、核实、处罚以及维修、清理、修剪、拆除、处理等纯诉求动作不得作为 behavior，除非原文另有“未退款、拒绝注销、尚未恢复”等已发生事实。road 仅具体命名道路；intersection 必须至少包含两条明确命名道路及其连接关系，单一道路加方向/设施和“交叉口”字样不是 intersection；poi 是小区、学校、医院、市场、机构等。港龙新港城北门口是 poi，不是 road。泛词不抽取；canonical 的对象和状态必须得到 surface/evidence 支持，不能把“影响采光”改成“影响通风”。
+实体：problem_objects 是具体领域对象，咨询许可证、注册、就学、查询等只提取被咨询对象；problem_behaviors 只表示已发生的问题行为、异常现象、状态或阻碍。咨询、查询、办理、注册、申请、转入、就读、了解等正常服务动作和希望/要求退款、销课、注销、恢复、核实、处罚、维修、清理、修剪、拆除、处理等纯诉求动作不得作为 behavior，除非原文明确有无法办理、拒绝受理、未退款、尚未恢复等已发生异常。road 仅具体命名道路；intersection 必须至少包含两条明确命名道路及其连接关系，单一道路加方向/设施和“交叉口”字样不是 intersection；poi 是具体小区、学校、医院、市场、机构等，裸“某镇/某街道/某区”和“东环路37号”等纯行政区/门牌不是 poi。港龙新港城北门口是 poi，不是 road。泛词不抽取；canonical 的对象和状态必须得到 surface/evidence 支持，不能把“影响采光”改成“影响通风”，也不能把“三无食品”改成“过期食品”。
 每个实体数组元素必须是 JSON 对象，绝不能输出字符串；严格为 {surface, canonical, field, evidence}，例如 roads=[{"surface":"人民路","canonical":"人民路","field":"case_content_clean","evidence":"人民路"}]；field 只能是 title_clean、case_content_clean、case_goal_clean、address_detail_clean；evidence 必须是该字段中的连续原文，surface 也必须忠实来自 evidence。
-Discourse：intents 必须是最多3个 {label,evidence} 对象，例 [{"label":"投诉","evidence":"投诉"}]，label 只能取投诉/举报/求助/咨询/建议/表扬/催办/反馈/其他；正文有明确“投诉/举报/咨询/建议/表扬/催办”时不得漏掉对应 intent，可直接复制该连续原词作为 evidence。emotions 必须是最多2个 {label,intensity,evidence} 对象，例 [{"label":"不满","intensity":2,"evidence":"其不认可"}]，label 只能取愤怒/不满/焦虑/无奈/悲伤/感谢/认可，intensity=1/2/3。禁止输出字符串数组、英文标签或“投诉举报”等组合标签；每个 discourse evidence 必须逐字复制某个 clean field 中的一段连续原文，不能改写、拼接或概括，找不到直接原文就删除该项。对象态度恶劣不等于诉求人愤怒。satisfaction 取 satisfied/dissatisfied/mixed/unknown，非 unknown 必须有 target 和直接 evidence，target 不能是“服务对象/诉求人”本人；模板“谢谢/感谢转交/请优先处理”不能判定满意。urgency 取 normal/high/critical；normal 的 evidence 必须为空；“优先处理”不能单独升高，critical 仅当前人身/火灾/燃气/坍塌等紧迫风险。
+Discourse：intents 必须是最多3个 {label,evidence} 对象，例 [{"label":"投诉","evidence":"投诉"}]，label 只能取投诉/举报/求助/咨询/建议/表扬/催办/反馈/其他；优先输出一个当前主意图，只有原文确有并列独立意图才增加；投诉/举报/咨询/建议/表扬/催办等明确表达优先于通用求助。emotions 必须是最多2个 {label,intensity,evidence} 对象，例 [{"label":"不满","intensity":2,"evidence":"其不认可"}]，label 只能取愤怒/不满/焦虑/无奈/悲伤/感谢/认可，intensity=1/2/3；emotion evidence 必须直接表达对应情绪，“威胁不给、态度恶劣”等对象行为不是诉求人不满。禁止输出字符串数组、英文标签或“投诉举报”等组合标签；每个 discourse evidence 必须逐字复制某个 clean field 中的一段连续原文，不能改写、拼接或概括。satisfaction 取 satisfied/dissatisfied/mixed/unknown，非 unknown 必须有 target 和“满意/不满意/认可/不认可/有异议”等直接评价 evidence；“不给、拖欠、违法”本身不能推断 dissatisfaction；target 不能是诉求人本人。模板“谢谢/感谢转交/请优先处理”不能判定满意。urgency 取 normal/high/critical；normal 的 evidence 必须为空；“优先处理”不能单独升高，critical 仅当前人身/火灾/燃气/坍塌等紧迫风险。
 上限：objects3、behaviors4、roads4、intersections2、pois4；没有可靠证据就输出空数组。不要输出 confidence、Markdown、解释或思维链。"""
 
 _COMPACT_FEW_SHOTS = """示例 1：输入“和平路路灯连续三天不亮，希望维修”→object=路灯；behavior=照明故障，surface/evidence=连续三天不亮；road=和平路；维修是诉求动作。
@@ -298,7 +298,9 @@ _COMPACT_FEW_SHOTS = """示例 1：输入“和平路路灯连续三天不亮，
 示例 3：输入“学校门前行道树树枝遮挡交通标志，建议修剪”→objects=行道树/交通标志；behavior=遮挡交通标志；修剪不是 behavior。
 示例 4：输入“培训机构突然闭店，学费还没有退，请优先退款，谢谢”→behaviors=机构闭店/退款未到账；satisfaction=unknown；urgency=normal。
 示例 5：输入“停车场收费员拒绝开票且态度恶劣，要求调查”→behaviors=拒绝提供票据/服务态度恶劣；emotions=[]，收费员态度不等于诉求人愤怒。
-示例 6：输入“部门答复称车位已清理。现表示不认可，通道仍被占用，再次要求处理”→当前 event=仍被占用并催办；satisfaction=dissatisfied(evidence=不认可)；urgency=high(evidence=仍被占用，再次要求处理)。"""
+示例 6：输入“部门答复称车位已清理。现表示不认可，通道仍被占用，再次要求处理”→当前 event=仍被占用并催办；satisfaction=dissatisfied(evidence=不认可)；urgency=high(evidence=仍被占用，再次要求处理)。
+示例 7：输入“咨询办理医疗器械经营许可证需要哪些材料”→object=医疗器械经营许可证；behaviors=[]；intent=咨询。
+示例 8：输入“人民路与花东街交叉口乱摆摊”→roads=人民路/花东街；intersection=人民路与花东街交叉口；behavior=乱摆摊。"""
 
 
 def build_semantic_prompt(order, config):

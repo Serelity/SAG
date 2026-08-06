@@ -42,6 +42,39 @@ class TestSemanticSchema(unittest.TestCase):
             ["invalid_satisfaction_label", "invalid_urgency_level"],
         )
 
+    def test_recovers_only_complete_safe_json_variants(self):
+        cases = (
+            (
+                '{"event_summary":"ok","entities":{},"discourse":{},}',
+                "json_recovered_trailing_comma",
+            ),
+            (
+                "{'event_summary':'ok','entities':{},'discourse':{}}",
+                "json_recovered_python_literal",
+            ),
+            (
+                '{"event_summary":"line\nbreak","entities":{},"discourse":{}}',
+                "json_recovered_control_character",
+            ),
+        )
+        for raw, expected_warning in cases:
+            with self.subTest(expected_warning=expected_warning):
+                parsed, warnings = parse_semantic_json(raw)
+                self.assertTrue(parsed["event_summary"])
+                self.assertEqual(warnings, [expected_warning])
+
+    def test_python_literal_recovery_rejects_non_json_types(self):
+        invalid_values = (
+            "{'event_summary':'bad','entities':{'roads':set()},'discourse':{}}",
+            '{"event_summary":"bad","entities":{},"discourse":{},"score":NaN}',
+            '{"event_summary":"bad","entities":{},"discourse":{},"score":1e400}',
+        )
+        for raw in invalid_values:
+            with self.subTest(raw=raw):
+                parsed, warnings = parse_semantic_json(raw)
+                self.assertEqual(parsed, normalize_semantic_output({}))
+                self.assertEqual(warnings, ["json_parse_failed"])
+
     def test_reports_json_parse_failure(self):
         parsed, warnings = parse_semantic_json('{"event_summary":')
         self.assertEqual(parsed, normalize_semantic_output({}))

@@ -1,6 +1,8 @@
 """Tolerant parsing and stable normalization for work-order semantic output."""
 
+import ast
 import json
+import math
 import re
 
 
@@ -234,44 +236,125 @@ def _strip_single_fence(text):
     return match.group("body") if match else stripped
 
 
-def _first_json_object(text):
+def _first_balanced_object(text):
+    """Yield complete top-level object candidates without mining nested fragments."""
     search_from = 0
     while True:
         start = text.find("{", search_from)
         if start < 0:
-            return None
+            return
 
         depth = 0
-        in_string = False
+        quote = ""
         escaped = False
         for end in range(start, len(text)):
             current = text[end]
-            if in_string:
+            if quote:
                 if escaped:
                     escaped = False
                 elif current == "\\":
                     escaped = True
-                elif current == '"':
-                    in_string = False
+                elif current == quote:
+                    quote = ""
                 continue
-            if current == '"':
-                in_string = True
+            if current in {'"', "'"}:
+                quote = current
             elif current == "{":
                 depth += 1
             elif current == "}":
                 depth -= 1
                 if depth == 0:
-                    try:
-                        value = json.loads(text[start:end + 1])
-                    except json.JSONDecodeError:
-                        search_from = end + 1
-                        break
-                    if isinstance(value, dict):
-                        return value
+                    yield text[start:end + 1]
                     search_from = end + 1
                     break
         else:
-            return None
+            # A truncated outer object must not be replaced by one of its
+            # balanced nested objects; only a model repair may recover it.
+            return
+
+
+def _remove_trailing_commas(text):
+    output = []
+    quote = ""
+    escaped = False
+    index = 0
+    changed = False
+    while index < len(text):
+        current = text[index]
+        if quote:
+            output.append(current)
+            if escaped:
+                escaped = False
+            elif current == "\\":
+                escaped = True
+            elif current == quote:
+                quote = ""
+            index += 1
+            continue
+        if current in {'"', "'"}:
+            quote = current
+            output.append(current)
+            index += 1
+            continue
+        if current == ",":
+            lookahead = index + 1
+            while lookahead < len(text) and text[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(text) and text[lookahead] in "]}":
+                changed = True
+                index += 1
+                continue
+        output.append(current)
+        index += 1
+    return "".join(output), changed
+
+
+def _is_json_literal(value):
+    if value is None or isinstance(value, (str, int, bool)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_is_json_literal(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _is_json_literal(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def _load_complete_object(candidate):
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        value = None
+    if isinstance(value, dict) and _is_json_literal(value):
+        return value, ""
+
+    without_trailing, changed = _remove_trailing_commas(candidate)
+    if changed:
+        try:
+            value = json.loads(without_trailing)
+        except json.JSONDecodeError:
+            value = None
+        if isinstance(value, dict) and _is_json_literal(value):
+            return value, "json_recovered_trailing_comma"
+
+    try:
+        value = json.loads(candidate, strict=False)
+    except json.JSONDecodeError:
+        value = None
+    if isinstance(value, dict) and _is_json_literal(value):
+        return value, "json_recovered_control_character"
+
+    try:
+        value = ast.literal_eval(candidate)
+    except (SyntaxError, ValueError, TypeError, MemoryError, RecursionError):
+        value = None
+    if isinstance(value, dict) and _is_json_literal(value):
+        return value, "json_recovered_python_literal"
+    return None, ""
 
 
 def parse_semantic_json(text, preserve_overflow=False):
@@ -282,7 +365,14 @@ def parse_semantic_json(text, preserve_overflow=False):
     """
     if not isinstance(text, str):
         return normalize_semantic_output({}), ["json_parse_failed"]
-    value = _first_json_object(_strip_single_fence(text))
-    if value is None:
-        return normalize_semantic_output({}), ["json_parse_failed"]
-    return _normalize(value, preserve_overflow=bool(preserve_overflow))
+    for candidate in _first_balanced_object(_strip_single_fence(text)):
+        value, recovery_warning = _load_complete_object(candidate)
+        if value is None:
+            continue
+        normalized, warnings = _normalize(
+            value, preserve_overflow=bool(preserve_overflow)
+        )
+        if recovery_warning:
+            warnings.insert(0, recovery_warning)
+        return normalized, warnings
+    return normalize_semantic_output({}), ["json_parse_failed"]

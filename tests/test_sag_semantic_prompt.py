@@ -107,9 +107,11 @@ class TestSemanticPrompt(unittest.TestCase):
             "培训机构突然闭店",
             "收费员拒绝开票",
             "部门答复称车位已清理",
+            "咨询办理医疗器械经营许可证",
+            "人民路与花东街交叉口乱摆摊",
         ):
             self.assertIn(expected, prompt)
-        self.assertEqual(prompt.count("示例 "), 6)
+        self.assertEqual(prompt.count("示例 "), 8)
 
     def test_prompt_has_exact_final_skeleton_and_entity_item_field(self):
         prompt = build_semantic_prompt({"case_content_clean": "正文"}, {})
@@ -215,7 +217,7 @@ class TestSemanticPrompt(unittest.TestCase):
         config = json.loads(path.read_text(encoding="utf-8"))
         self.assertEqual(config, {
             "schema_version": "2.0",
-            "prompt_version": "sag_semantic_v6",
+            "prompt_version": "sag_semantic_v7",
             "model_id": "Qwen/Qwen3-4B",
             "model_path": "models/Qwen3-4B",
             "backend": "transformers",
