@@ -9,7 +9,10 @@ from collections import Counter
 from pathlib import Path
 
 from ragflow_style_pipeline.document_builder import build_document
-from ragflow_style_pipeline.sag_semantic_versions import MULTIVIEW_INPUT_VERSION
+from ragflow_style_pipeline.sag_semantic_versions import (
+    MULTIVIEW_INPUT_VERSION,
+    PII_REDACTION_VERSION,
+)
 from ragflow_style_pipeline.work_order_input import CLEAN_FIELDS, content_hash
 
 
@@ -85,6 +88,7 @@ def export_tsv_to_jsonl(input_path, output_path, quality_report_path, limit=None
                     continue
 
                 document["input_schema"] = MULTIVIEW_INPUT_VERSION
+                document["redaction_version"] = PII_REDACTION_VERSION
                 document["content_hash"] = content_hash(document)
                 output_file.write(json.dumps(document, ensure_ascii=False) + "\n")
                 documents_written += 1
@@ -95,6 +99,7 @@ def export_tsv_to_jsonl(input_path, output_path, quality_report_path, limit=None
         output_sha256, output_bytes = _file_sha256_and_size(output_temporary)
         report = {
             "schema": MULTIVIEW_INPUT_VERSION,
+            "redaction_version": PII_REDACTION_VERSION,
             "clean_fields": list(CLEAN_FIELDS),
             "content_hash_contract": "clean_fields_plus_metadata_v1",
             "input_path": str(input_path),

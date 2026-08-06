@@ -6,7 +6,10 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from ragflow_style_pipeline.sag_semantic_versions import MULTIVIEW_INPUT_VERSION
+from ragflow_style_pipeline.sag_semantic_versions import (
+    MULTIVIEW_INPUT_VERSION,
+    PII_REDACTION_VERSION,
+)
 from ragflow_style_pipeline.work_order_input import CLEAN_FIELDS, WorkOrderInputError, normalize_work_order
 
 _SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
@@ -45,6 +48,9 @@ def check_multiview_export(input_path, quality_report_path=""):
                 counts["record_not_object"] += 1
                 continue
             counts["invalid_schema"] += row.get("input_schema") != MULTIVIEW_INPUT_VERSION
+            counts["invalid_redaction_version"] += (
+                row.get("redaction_version") != PII_REDACTION_VERSION
+            )
             counts["missing_or_invalid_clean_field"] += any(
                 field not in row or not isinstance(row.get(field), str)
                 for field in CLEAN_FIELDS
@@ -86,6 +92,9 @@ def check_multiview_export(input_path, quality_report_path=""):
             quality_errors["quality_report_unreadable"] += 1
         if quality:
             quality_errors["quality_schema_mismatch"] += quality.get("schema") != MULTIVIEW_INPUT_VERSION
+            quality_errors["quality_redaction_version_mismatch"] += (
+                quality.get("redaction_version") != PII_REDACTION_VERSION
+            )
             quality_errors["quality_records_mismatch"] += quality.get("documents_written") != counts["records"]
             quality_errors["quality_bytes_mismatch"] += quality.get("output_bytes") != output_bytes
             quality_errors["quality_sha256_mismatch"] += quality.get("output_sha256") != output_sha256
@@ -99,6 +108,7 @@ def check_multiview_export(input_path, quality_report_path=""):
     return {
         "schema": "sag_multiview_export_check_v1",
         "input_schema": MULTIVIEW_INPUT_VERSION,
+        "redaction_version": PII_REDACTION_VERSION,
         "private_input": True,
         "records": counts["records"],
         "clean_field_presence": {

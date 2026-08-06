@@ -30,7 +30,7 @@
 当前本机原始 TSV 位于 `G:\\12345_pro_promax\\data\\t_order_master.tsv`；WSL/Git Bash 对应 `/g/12345_pro_promax/data/t_order_master.tsv`。脱敏导出、检查、画像和标注均在本机运行，不要为这些步骤连接服务器：
 
 ```bash
-PRIVATE_ROOT=/g/RAG/SAG_private/semantic-eval/current-v1
+PRIVATE_ROOT=/g/RAG/SAG_private/semantic-eval/current-v2
 INPUT_JSONL="$PRIVATE_ROOT/input/t_order_master.100k.multiview.private.jsonl"
 mkdir -p "$PRIVATE_ROOT/input" "$PRIVATE_ROOT/audit"
 
@@ -42,7 +42,8 @@ PYTHONPATH=src python -m ragflow_style_pipeline.export_jsonl \
 
 PYTHONPATH=src python -m ragflow_style_pipeline.scan_jsonl_safety \
   --input "$INPUT_JSONL" \
-  --output "$PRIVATE_ROOT/input/t_order_master.100k.safety.safe.json"
+  --output "$PRIVATE_ROOT/input/t_order_master.100k.safety.safe.json" \
+  --fail-on-findings
 
 PYTHONPATH=src python scripts/check_multiview_export.py \
   --input "$INPUT_JSONL" \
@@ -56,7 +57,7 @@ PYTHONPATH=src python scripts/profile_semantic_input.py \
   --head-size 32
 ```
 
-`input_schema=sag_multiview_input_v2` 明确输出 `title_clean/case_content_clean/case_goal_clean/address_detail_clean`，每条记录携带按四个 clean fields 与 metadata 计算的稳定 `content_hash`。源 `metadata.order_id` 不进入脱敏 JSONL；工单身份使用脱敏 `doc_id`，从原 TSV 直接建 SAG 时仍可计算 `order_id_hash`。四字段全空记录在导出阶段聚合跳过，不再留给推理 adapter 拒绝。quality report 保存输出 bytes/SHA-256；checker 验证 schema、四字段、hash、doc_id/identity 唯一性与 quality provenance，且只输出聚合信息。
+`input_schema=sag_multiview_input_v2` 明确输出 `title_clean/case_content_clean/case_goal_clean/address_detail_clean`，每条记录携带按四个 clean fields 与 metadata 计算的稳定 `content_hash`。`redaction_version=sag_pii_redaction_v2` 独立记录脱敏契约，覆盖手机号、身份证/长编号、显式姓名、明确联系人姓名、邮箱、带标签座机、QQ 和微信；scanner 对所有模型可见 clean fields 与 metadata 执行零残留 gate。源 `metadata.order_id` 不进入脱敏 JSONL；工单身份使用脱敏 `doc_id`，从原 TSV 直接建 SAG 时仍可计算 `order_id_hash`。四字段全空记录在导出阶段聚合跳过，不再留给推理 adapter 拒绝。quality report 保存输出 bytes/SHA-256；checker 验证 schema、redaction version、四字段、hash、doc_id/identity 唯一性与 quality provenance，且只输出聚合信息。
 
 报告只含聚合数字。词法 proxy 仅用于抽样，不是 gold，不能将 `road_form`、`semantic_gap` 或情绪触发词数量解释为真实 precision/recall。
 

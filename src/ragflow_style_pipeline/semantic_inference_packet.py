@@ -10,6 +10,7 @@ from ragflow_style_pipeline.sag_semantic_versions import (
     EVAL_MANIFEST_VERSION,
     INFERENCE_PACKET_VERSION,
     MULTIVIEW_INPUT_VERSION,
+    PII_REDACTION_VERSION,
 )
 from ragflow_style_pipeline.work_order_input import (
     CLEAN_FIELDS,
@@ -95,6 +96,8 @@ def build_inference_packet(input_path, manifest_path, output_path):
                 continue
             if raw_doc_id in selected:
                 raise ValueError("target_doc_id_duplicated_in_source")
+            if raw.get("redaction_version") != PII_REDACTION_VERSION:
+                raise ValueError("target_redaction_version_mismatch")
             try:
                 order = normalize_work_order(raw)
             except WorkOrderInputError as error:
@@ -103,6 +106,7 @@ def build_inference_packet(input_path, manifest_path, output_path):
                 raise ValueError("target_content_hash_mismatch")
             selected[raw_doc_id] = {
                 "input_schema": MULTIVIEW_INPUT_VERSION,
+                "redaction_version": PII_REDACTION_VERSION,
                 "inference_packet_schema": INFERENCE_PACKET_VERSION,
                 "doc_id": order["doc_id"],
                 "content_hash": order["content_hash"],
@@ -140,7 +144,8 @@ def build_inference_packet(input_path, manifest_path, output_path):
         "output_bytes": len(encoded),
         "output_sha256": _hash_bytes(encoded),
         "fields": [
-            "input_schema", "inference_packet_schema", "doc_id", "content_hash",
+            "input_schema", "redaction_version", "inference_packet_schema",
+            "doc_id", "content_hash",
             *CLEAN_FIELDS, "metadata",
         ],
     }

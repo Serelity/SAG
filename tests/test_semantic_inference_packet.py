@@ -12,6 +12,7 @@ class TestSemanticInferencePacket(unittest.TestCase):
         source_rows = [
             {
                 "input_schema": "sag_multiview_input_v2",
+                "redaction_version": "sag_pii_redaction_v2",
                 "doc_id": "private-order-1",
                 "title_clean": "",
                 "case_content_clean": "私有正文一",
@@ -26,6 +27,7 @@ class TestSemanticInferencePacket(unittest.TestCase):
             {"doc_id": "invalid-unrelated", "case_content_clean": ""},
             {
                 "input_schema": "sag_multiview_input_v2",
+                "redaction_version": "sag_pii_redaction_v2",
                 "doc_id": "private-order-2",
                 "title_clean": "",
                 "case_content_clean": "私有正文二",
@@ -71,6 +73,7 @@ class TestSemanticInferencePacket(unittest.TestCase):
         self.assertEqual(report["records_written"], 2)
         self.assertEqual(set(rows[0]), set(report["fields"]))
         for row in rows:
+            self.assertEqual(row["redaction_version"], "sag_pii_redaction_v2")
             self.assertEqual(row["inference_packet_schema"], "sag_semantic_inference_packet_v1")
             self.assertNotIn("text", row)
             self.assertNotIn("display_text", row)

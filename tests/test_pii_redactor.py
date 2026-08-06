@@ -70,6 +70,36 @@ class TestPiiRedactor(unittest.TestCase):
         self.assertEqual(text, "快递[业务编号]一直不更新")
         self.assertEqual(counts["alnum_id"], 1)
 
+    def test_redacts_extended_contact_identifiers(self):
+        text, counts = redact_text(
+            "联系人：王小明，联系电话0519-88886666，"
+            "邮箱user@example.com，QQ：12345678，微信号wx_user88"
+        )
+
+        self.assertEqual(
+            text,
+            "联系人：[姓名]，联系电话[座机]，邮箱[邮箱]，QQ：[QQ号]，微信号[微信号]",
+        )
+        self.assertEqual(counts["contact_name"], 1)
+        self.assertEqual(counts["landline"], 1)
+        self.assertEqual(counts["email"], 1)
+        self.assertEqual(counts["qq"], 1)
+        self.assertEqual(counts["wechat"], 1)
+
+    def test_redacts_unlabeled_contact_name_only_when_followed_by_phone(self):
+        phone = "138" + "0013" + "8000"
+        text, counts = redact_text("联系人王小明" + phone + "，联系人反馈问题")
+
+        self.assertEqual(text, "联系人[姓名][手机号]，联系人反馈问题")
+        self.assertEqual(counts["contact_name"], 1)
+        self.assertEqual(counts["phone"], 1)
+
+    def test_does_not_redact_contact_business_phrases_as_names(self):
+        text, counts = redact_text("联系人反馈问题，联系人办理业务，联系人表示不认可")
+
+        self.assertEqual(text, "联系人反馈问题，联系人办理业务，联系人表示不认可")
+        self.assertEqual(counts["contact_name"], 0)
+
     def test_redacts_name_after_explicit_name_label(self):
         text, counts = redact_text("服务对象（姓名：李长泉，身份证：[身份证号]）反映拖欠工资")
 

@@ -29,6 +29,7 @@ class TestExportJsonl(unittest.TestCase):
         self.assertEqual(len(docs), 2)
         self.assertTrue(docs[0]["doc_id"].startswith("order_"))
         self.assertEqual(docs[0]["input_schema"], "sag_multiview_input_v2")
+        self.assertEqual(docs[0]["redaction_version"], "sag_pii_redaction_v2")
         self.assertEqual(docs[0]["content_hash"], normalize_work_order(docs[0])["content_hash"])
         self.assertNotIn("order_id", docs[0]["metadata"])
         self.assertIn("诉求内容：市民反映附近夜间摆摊扰民", docs[0]["text"])
@@ -37,6 +38,7 @@ class TestExportJsonl(unittest.TestCase):
         self.assertEqual(report["rows_skipped_bad_field_count"], 0)
         self.assertEqual(quality["documents_written"], 2)
         self.assertEqual(quality["schema"], "sag_multiview_input_v2")
+        self.assertEqual(quality["redaction_version"], "sag_pii_redaction_v2")
         self.assertEqual(quality["clean_fields"], [
             "title_clean", "case_content_clean", "case_goal_clean", "address_detail_clean",
         ])
