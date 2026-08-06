@@ -17,7 +17,13 @@ try {
   }
   Remove-Item -LiteralPath (Join-Path $StagingDir "tests\fixtures") -Recurse -Force -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path (Join-Path $StagingDir "docs") | Out-Null
-  Copy-Item -LiteralPath (Join-Path $ProjectRoot "docs\13-Qwen4B工单级语义抽取.md") -Destination (Join-Path $StagingDir "docs") -Force
+  foreach ($Pattern in @("13-*.md", "14-*.md")) {
+    $Docs = @(Get-ChildItem -LiteralPath (Join-Path $ProjectRoot "docs") -File -Filter $Pattern)
+    if ($Docs.Count -ne 1) {
+      throw "Expected exactly one documentation file matching $Pattern"
+    }
+    Copy-Item -LiteralPath $Docs[0].FullName -Destination (Join-Path $StagingDir "docs") -Force
+  }
   foreach ($Name in @("requirements.sag.txt", "requirements.entity.txt", "requirements.vllm.txt")) {
     Copy-Item -LiteralPath (Join-Path $ProjectRoot $Name) -Destination $StagingDir -Force
   }

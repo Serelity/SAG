@@ -98,7 +98,7 @@ bash scripts/project_semantics_to_sag.sh
 LIMIT=995 bash scripts/build_sag_semantic_100k.sh
 ```
 
-人工抽样必须覆盖：开放领域主题、诉求动作/问题行为、road/intersection/POI、历史答复/当前立场、模板谢谢、对象态度/诉求人情绪和 discourse。验证器通过率不能当作准确率。重点比较 quality report 中 `all_entities_empty_rate`、`intent_coverage`、`repair_attempted_count`、`json_recovery_count`、`semantic_gap_counts` 及 warning counts；字符串 entity 和合成 intersection 必须同时满足逐字 evidence 和类型 gate。
+人工抽样必须覆盖：开放领域主题、诉求动作/问题行为、road/intersection/POI、历史答复/当前立场、模板谢谢、对象态度/诉求人情绪和 discourse。验证器通过率不能当作准确率。重点比较 quality report 中 `all_entities_empty_rate`、`intent_coverage`、`repair_attempted_count`、`json_recovery_count`、`semantic_gap_counts` 及 warning counts；字符串 entity 和合成 intersection 必须同时满足逐字 evidence 和类型 gate。面向 SAG 的正式验收、生产分布/挑战集抽样、私有 candidate ledger、Issue 标注及 Oracle flat/issue-aware 超边比较见 `docs/14-SAG语义评测与Issue标注.md`；实体非空 coverage 不能替代 mention、attachment、false co-membership 和最终检索指标。
 
 ## 6. 100k 与恢复
 

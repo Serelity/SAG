@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 
+from ragflow_style_pipeline.sag_semantic_versions import PROJECTION_VERSION
 from ragflow_style_pipeline.work_order_input import read_work_orders
 
 GROUP_TO_TYPE = {
@@ -27,7 +28,12 @@ def project_semantic_record(record, order):
     status = _text(validation.get("status"))
     event_value = record.get("event") if isinstance(record.get("event"), dict) else {}
     summary = _text(event_value.get("summary")) or _text(record.get("event_summary"))
-    event = {"doc_id": doc_id, "event_text": summary, "validation_status": status}
+    event = {
+        "doc_id": doc_id,
+        "event_text": summary,
+        "validation_status": status,
+        "projection_version": PROJECTION_VERSION,
+    }
     prompt_version = _text((record.get("model_run") or {}).get("prompt_version")) if isinstance(record.get("model_run"), dict) else ""
     links = []
     entities = record.get("entities") if isinstance(record.get("entities"), dict) else {}
@@ -47,6 +53,7 @@ def project_semantic_record(record, order):
                     "source_field": _text(item.get("source_field") or item.get("field")),
                     "source_channel": "semantic_llm", "matched_text": _text(item.get("evidence")),
                     "validation_status": status, "prompt_version": prompt_version,
+                    "projection_version": PROJECTION_VERSION,
                 })
     discourse_value = record.get("discourse") if isinstance(record.get("discourse"), dict) else {}
     metadata = order.get("metadata") if isinstance(order.get("metadata"), dict) else {}
@@ -66,6 +73,7 @@ def project_semantic_record(record, order):
         "satisfaction_evidence": _text(satisfaction.get("evidence")),
         "urgency": _text(urgency.get("level")) or "normal",
         "urgency_evidence": _text(urgency.get("evidence")),
+        "projection_version": PROJECTION_VERSION,
     }
     return event, links, discourse
 

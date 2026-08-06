@@ -218,6 +218,7 @@ class TestSemanticPrompt(unittest.TestCase):
         self.assertEqual(config, {
             "schema_version": "2.0",
             "prompt_version": "sag_semantic_v7",
+            "decoder_contract_version": "unconstrained_json_v1",
             "model_id": "Qwen/Qwen3-4B",
             "model_path": "models/Qwen3-4B",
             "backend": "transformers",

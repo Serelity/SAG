@@ -67,6 +67,9 @@ def summarize(path):
                     for key in (
                         "records_written", "rejects_written", "primary_requests", "repair_requests",
                         "primary_batches", "repair_batches", "elapsed_seconds",
+                        "stage_seconds", "run_attempt_id",
+                        "candidate_entries_before_run", "decision_entries_before_run",
+                        "candidate_entries_written", "decision_entries_written",
                         "current_allocated_gb", "current_reserved_gb",
                         "peak_allocated_gb", "peak_reserved_gb",
                     )

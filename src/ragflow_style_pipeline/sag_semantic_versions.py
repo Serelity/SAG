@@ -1,0 +1,12 @@
+"""Independent versions for semantic validation, decoding, and SAG projection."""
+
+VALIDATOR_VERSION = "sag_semantic_validator_v1"
+PROJECTION_VERSION = "sag_semantic_projection_v1"
+DECODER_CONTRACT_VERSION = "unconstrained_json_v1"
+CANDIDATE_LEDGER_VERSION = "sag_semantic_candidate_ledger_v1"
+DECISION_LEDGER_VERSION = "sag_semantic_decision_ledger_v1"
+INPUT_PROFILE_VERSION = "sag_semantic_input_profile_v1"
+EVAL_MANIFEST_VERSION = "sag_semantic_eval_manifest_v1"
+GOLD_SCHEMA_VERSION = "sag_issue_gold_v1"
+EVALUATION_VERSION = "sag_semantic_evaluation_v1"
+VALIDATOR_REPLAY_VERSION = "sag_semantic_validator_replay_v1"

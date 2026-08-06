@@ -52,6 +52,7 @@ SAG_EVENT_COLUMNS = [
     "event_month",
     "event_source",
     "event_status",
+    "projection_version",
 ]
 
 SAG_ENTITY_COLUMNS = ["entity_id", "entity_type", "entity_value", "normalized_value"]
@@ -70,6 +71,7 @@ SAG_LINK_COLUMNS = [
     "matched_text",
     "validation_status",
     "prompt_version",
+    "projection_version",
 ]
 
 SAG_DISCOURSE_COLUMNS = [
@@ -84,6 +86,7 @@ SAG_DISCOURSE_COLUMNS = [
     "satisfaction_evidence",
     "urgency",
     "urgency_evidence",
+    "projection_version",
 ]
 
 
@@ -200,6 +203,7 @@ def event_row(source_order):
         "event_month": source_order.get("call_month", ""),
         "event_source": "t_order_master",
         "event_status": source_order.get("order_status", ""),
+        "projection_version": "",
     }
 
 
@@ -322,6 +326,7 @@ def build_sag_db_from_orders(
         summary = clean_value(override.get("event_text")) or clean_value(semantic_event.get("summary"))
         if summary and status in {"accepted", "accepted_with_warnings"}:
             event["event_text"] = summary
+        event["projection_version"] = clean_value(override.get("projection_version"))
     event_by_doc = {event["doc_id"]: event for event in events}
 
     entity_rows_by_key = {}
@@ -369,6 +374,7 @@ def build_sag_db_from_orders(
                 "matched_text": matched_text,
                 "validation_status": clean_value(_link_value(link, "validation_status")),
                 "prompt_version": clean_value(_link_value(link, "prompt_version")),
+                "projection_version": clean_value(_link_value(link, "projection_version")),
             })
 
     discourse_rows = []

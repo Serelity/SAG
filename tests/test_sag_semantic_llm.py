@@ -125,6 +125,44 @@ class TestSemanticLlm(unittest.TestCase):
         self.assertEqual(quality["json_recovery_count"], 1)
         self.assertEqual(quality["semantic_gap_counts"], {})
 
+    def test_private_candidate_and_decision_ledgers_are_opt_in_and_versioned(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)
+            candidate_path = tmp/"candidates.private.jsonl"
+            decision_path = tmp/"decisions.private.jsonl"
+            report = run_semantic_extraction(
+                source, tmp/"semantic.jsonl", tmp/"rejects.jsonl",
+                tmp/"run.json", tmp/"quality.json", "unused",
+                {
+                    "model_id":"Qwen/Qwen3-4B", "prompt_version":"sag_semantic_v7",
+                    "batch_size":1, "checkpoint_every":1,
+                },
+                generator=RecordingGenerator(False),
+                candidate_ledger_path=candidate_path,
+                decision_ledger_path=decision_path,
+            )
+            candidate = json.loads(candidate_path.read_text(encoding="utf-8"))
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+            record = json.loads((tmp/"semantic.jsonl").read_text(encoding="utf-8"))
+        self.assertTrue(candidate["private"])
+        self.assertEqual(candidate["phase"], "primary")
+        self.assertTrue(candidate["run_attempt_id"])
+        self.assertEqual(candidate["ledger_sequence"], 1)
+        self.assertIn("candidate", candidate)
+        self.assertNotIn("raw_response", candidate)
+        self.assertTrue(decision["private"])
+        self.assertEqual(decision["validator_version"], "sag_semantic_validator_v1")
+        self.assertEqual(decision["run_attempt_id"], candidate["run_attempt_id"])
+        self.assertEqual(decision["ledger_sequence"], 1)
+        self.assertIn("validation_before", decision)
+        self.assertIn("validation_after", decision)
+        self.assertEqual(report["candidate_entries_written"], 1)
+        self.assertEqual(report["decision_entries_written"], 1)
+        self.assertIn("stage_seconds", report)
+        self.assertEqual(report["validator_version"], "sag_semantic_validator_v1")
+        self.assertEqual(record["artifact_versions"]["projection"], "sag_semantic_projection_v1")
+        self.assertEqual(record["model_run"]["decoder_contract_version"], "unconstrained_json_v1")
+
     def test_invalid_optional_candidate_is_dropped_without_repair(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir); source = tmp/"orders.jsonl"; self._input(source)
@@ -456,6 +494,14 @@ class TestSemanticLlm(unittest.TestCase):
         self.assertEqual(overridden.repair_batch_size, 4)
         self.assertEqual(overridden.backend, "vllm")
         self.assertEqual(overridden.diagnostic_log, "outputs/d.jsonl")
+        private = parse_args([
+            "--input","safe.multiview.jsonl","--output","outputs/a.jsonl","--rejects","outputs/r.jsonl",
+            "--run-report","outputs/run.json","--quality-report","outputs/q.json","--config","config.json",
+            "--model-path","models/Qwen3-4B","--candidate-ledger","outputs/c.private.jsonl",
+            "--decision-ledger","outputs/d.private.jsonl",
+        ])
+        self.assertEqual(private.candidate_ledger, "outputs/c.private.jsonl")
+        self.assertEqual(private.decision_ledger, "outputs/d.private.jsonl")
 
 
 if __name__ == "__main__":

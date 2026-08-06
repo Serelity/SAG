@@ -56,6 +56,10 @@ class TestSummarizeSemanticDiagnostics(unittest.TestCase):
                 "primary_batches": 1,
                 "repair_batches": 0,
                 "elapsed_seconds": 1.5,
+                "stage_seconds": {"model_load": 1.0, "generation_wall": 0.4},
+                "run_attempt_id": "safe-attempt-id",
+                "candidate_entries_written": 1,
+                "decision_entries_written": 1,
             },
         ]
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -79,6 +83,8 @@ class TestSummarizeSemanticDiagnostics(unittest.TestCase):
         self.assertEqual(result["last_event"], "run_completed")
         self.assertEqual(result["run_completed"]["primary_batches"], 1)
         self.assertEqual(result["run_completed"]["repair_batches"], 0)
+        self.assertEqual(result["run_completed"]["stage_seconds"]["model_load"], 1.0)
+        self.assertEqual(result["run_completed"]["candidate_entries_written"], 1)
         self.assertEqual(json.loads(output.getvalue()), result)
 
 

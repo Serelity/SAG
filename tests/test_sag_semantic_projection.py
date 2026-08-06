@@ -21,6 +21,12 @@ class TestSemanticProjection(unittest.TestCase):
         self.assertTrue(all("confidence" not in row for row in links))
         self.assertEqual(discourse["declared_intent"], "求助")
         self.assertEqual(discourse["satisfaction"], "unknown")
+        self.assertEqual(event["projection_version"], "sag_semantic_projection_v1")
+        self.assertTrue(all(
+            row["projection_version"] == "sag_semantic_projection_v1"
+            for row in links
+        ))
+        self.assertEqual(discourse["projection_version"], "sag_semantic_projection_v1")
 
     def test_projection_file_writes_atomic_outputs(self):
         with tempfile.TemporaryDirectory() as tmpdir:

@@ -17,6 +17,13 @@ from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import build_repair_prompt, build_semantic_prompt
 from ragflow_style_pipeline.sag_semantic_schema import ENTITY_GROUPS, GROUP_LIMITS, parse_semantic_json
+from ragflow_style_pipeline.sag_semantic_versions import (
+    CANDIDATE_LEDGER_VERSION,
+    DECISION_LEDGER_VERSION,
+    DECODER_CONTRACT_VERSION,
+    PROJECTION_VERSION,
+    VALIDATOR_VERSION,
+)
 from ragflow_style_pipeline.sag_semantic_validation import (
     enrich_semantic_output,
     sanitize_semantic_output,
@@ -97,6 +104,13 @@ def _read_jsonl(path):
     return rows
 
 
+def _jsonl_record_count(path):
+    if not path or not Path(path).exists():
+        return 0
+    with Path(path).open("r", encoding="utf-8") as source:
+        return sum(1 for line in source if line.strip())
+
+
 def _percentile(values, fraction):
     if not values:
         return 0
@@ -140,6 +154,13 @@ def _bucket_orders(orders, boundaries):
 def _record(order, semantic, validation, generation, config, repair_attempted):
     return {
         "schema_version": str(config.get("schema_version", "2.0")),
+        "artifact_versions": {
+            "validator": VALIDATOR_VERSION,
+            "projection": PROJECTION_VERSION,
+            "decoder_contract": str(
+                config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
+            ),
+        },
         "doc_id": order["doc_id"],
         "content_hash": order["content_hash"],
         "event": {
@@ -153,6 +174,7 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         "entities": semantic.get("entities", {}),
         "discourse": semantic.get("discourse", {}),
         "validation": {
+            "validator_version": VALIDATOR_VERSION,
             "status": validation["status"],
             "warnings": validation["warnings"],
             "repair_fields": validation["repair_fields"],
@@ -161,6 +183,9 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
         "model_run": {
             "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
             "prompt_version": str(config.get("prompt_version", "sag_semantic_v7")),
+            "decoder_contract_version": str(
+                config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
+            ),
             "backend": str(config.get("backend", "transformers")),
             "input_tokens": generation["input_tokens"],
             "output_tokens": generation["output_tokens"],
@@ -267,6 +292,57 @@ def _semantic_counts(semantic):
             discourse.get("urgency", {}).get("level", "normal")
             if isinstance(discourse, dict) and isinstance(discourse.get("urgency"), dict) else "normal"
         ),
+    }
+
+
+def _private_candidate_entry(
+    order, phase, semantic, parse_warnings, generation, config,
+    run_attempt_id, ledger_sequence,
+):
+    return {
+        "schema": CANDIDATE_LEDGER_VERSION,
+        "private": True,
+        "doc_id": order.get("doc_id", ""),
+        "content_hash": order.get("content_hash", ""),
+        "phase": phase,
+        "run_attempt_id": run_attempt_id,
+        "ledger_sequence": ledger_sequence,
+        "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
+        "prompt_version": str(config.get("prompt_version", "sag_semantic_v7")),
+        "decoder_contract_version": str(
+            config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
+        ),
+        "candidate": semantic,
+        "parse_warnings": list(parse_warnings or []),
+        "generation": {
+            "input_tokens": generation.get("input_tokens", 0),
+            "output_tokens": generation.get("output_tokens", 0),
+            "finish_reason": generation.get("finish_reason", "unknown"),
+            "latency_ms": generation.get("latency_ms", 0),
+        },
+    }
+
+
+def _private_decision_entry(
+    order, phase, final_semantic, validation, trace,
+    run_attempt_id, ledger_sequence,
+):
+    before = trace.get("validation_before") if isinstance(trace, dict) else {}
+    after = trace.get("validation_after") if isinstance(trace, dict) else {}
+    return {
+        "schema": DECISION_LEDGER_VERSION,
+        "private": True,
+        "validator_version": VALIDATOR_VERSION,
+        "doc_id": order.get("doc_id", ""),
+        "content_hash": order.get("content_hash", ""),
+        "phase": phase,
+        "run_attempt_id": run_attempt_id,
+        "ledger_sequence": ledger_sequence,
+        "parse_warnings": list(trace.get("parse_warnings", [])) if isinstance(trace, dict) else [],
+        "validation_before": before,
+        "actions": list(trace.get("sanitation_warnings", [])) if isinstance(trace, dict) else [],
+        "validation_after": after or validation,
+        "final_counts": _semantic_counts(final_semantic),
     }
 
 
@@ -596,12 +672,16 @@ def _quality_report(records, rejects):
 def run_semantic_extraction(
     input_path, output_path, rejects_path, run_report_path, quality_report_path,
     model_path, config, limit=None, resume=False, retry_rejected=False, generator=None,
-    doc_ids=None, diagnostic_path=None,
+    doc_ids=None, diagnostic_path=None, candidate_ledger_path=None,
+    decision_ledger_path=None,
 ):
     """Run one primary request per order and at most one selective repair."""
     del retry_rejected  # Rejected rows are selected with doc_ids for an explicit safe rerun.
     started_wall = time.time()
     started_at = _utc_now()
+    run_attempt_id = hashlib.sha256(
+        f"{started_at}:{os.getpid()}:{time.time_ns()}".encode("utf-8")
+    ).hexdigest()[:16]
     config = dict(config)
     model_id = str(config.get("model_id", "Qwen/Qwen3-4B"))
     prompt_version = str(config.get("prompt_version", "sag_semantic_v7"))
@@ -611,14 +691,31 @@ def run_semantic_extraction(
     partial_path = Path(str(output_path) + ".partial.jsonl")
     checkpoint_path = Path(str(output_path) + ".checkpoint.json")
     diagnostic_path = Path(diagnostic_path or (str(output_path) + ".diagnostics.jsonl"))
+    candidate_ledger_path = Path(candidate_ledger_path) if candidate_ledger_path else None
+    decision_ledger_path = Path(decision_ledger_path) if decision_ledger_path else None
     if not resume:
         diagnostic_path.unlink(missing_ok=True)
+        if candidate_ledger_path:
+            _write_jsonl(candidate_ledger_path, [])
+        if decision_ledger_path:
+            _write_jsonl(decision_ledger_path, [])
     _append_diagnostic(diagnostic_path, {
         "event": "run_initialized", "ts": _utc_now(),
         "schema": "privacy_safe_diagnostics_v1", "resume": bool(resume),
+        "run_attempt_id": run_attempt_id,
     })
+    stage_seconds = {
+        "input_read": 0.0,
+        "model_load": 0.0,
+        "prompt_build": 0.0,
+        "generation_wall": 0.0,
+        "validation": 0.0,
+        "artifact_write": 0.0,
+    }
+    stage_started = time.perf_counter()
     try:
         orders = read_work_orders(input_path, limit=limit)
+        stage_seconds["input_read"] += time.perf_counter() - stage_started
     except Exception as error:
         _append_diagnostic(diagnostic_path, {
             "event": "run_failed", "ts": _utc_now(), "stage": "input_read",
@@ -657,6 +754,14 @@ def run_semantic_extraction(
     primary_batches = 0
     repair_batches = 0
     generation_rows = []
+    pending_candidate_entries = []
+    pending_decision_entries = []
+    candidate_entries_before_run = _jsonl_record_count(candidate_ledger_path)
+    decision_entries_before_run = _jsonl_record_count(decision_ledger_path)
+    candidate_ledger_sequence = candidate_entries_before_run
+    decision_ledger_sequence = decision_entries_before_run
+    candidate_entries_written = 0
+    decision_entries_written = 0
     ordered_pending = _bucket_orders(pending, config.get("length_bucket_boundaries", [600, 1400]))
     _append_diagnostic(diagnostic_path, {
         "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
@@ -665,10 +770,17 @@ def run_semantic_extraction(
         "max_new_tokens": int(config.get("max_new_tokens", 512)),
         "repair_max_new_tokens": int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))),
         "prompt_version": prompt_version, "model": model_id, "backend": backend,
+        "validator_version": VALIDATOR_VERSION,
+        "projection_version": PROJECTION_VERSION,
+        "decoder_contract_version": str(
+            config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
+        ),
     })
     if generator is None:
+        model_load_started = time.perf_counter()
         try:
             generator = _load_configured_generator(model_path, config)
+            stage_seconds["model_load"] += time.perf_counter() - model_load_started
         except Exception as error:
             _append_diagnostic(diagnostic_path, {
                 "event": "run_failed", "ts": _utc_now(), "stage": "model_load",
@@ -689,6 +801,38 @@ def run_semantic_extraction(
 
     repair_queue = []
 
+    def queue_private_audit(order, phase, candidate, parse_warnings, generation, final_semantic, validation, trace):
+        nonlocal candidate_ledger_sequence, decision_ledger_sequence
+        if candidate_ledger_path:
+            candidate_ledger_sequence += 1
+            pending_candidate_entries.append(
+                _private_candidate_entry(
+                    order, phase, candidate, parse_warnings, generation, config,
+                    run_attempt_id, candidate_ledger_sequence,
+                )
+            )
+        if decision_ledger_path:
+            decision_ledger_sequence += 1
+            pending_decision_entries.append(
+                _private_decision_entry(
+                    order, phase, final_semantic, validation, trace,
+                    run_attempt_id, decision_ledger_sequence,
+                )
+            )
+
+    def flush_private_audit():
+        nonlocal candidate_entries_written, decision_entries_written
+        write_started = time.perf_counter()
+        if candidate_ledger_path and pending_candidate_entries:
+            _append_jsonl(candidate_ledger_path, pending_candidate_entries)
+            candidate_entries_written += len(pending_candidate_entries)
+            pending_candidate_entries.clear()
+        if decision_ledger_path and pending_decision_entries:
+            _append_jsonl(decision_ledger_path, pending_decision_entries)
+            decision_entries_written += len(pending_decision_entries)
+            pending_decision_entries.clear()
+        stage_seconds["artifact_write"] += time.perf_counter() - write_started
+
     def flush_repairs(force=False):
         nonlocal repair_requests, repair_batches
         while len(repair_queue) >= repair_batch_size or (force and repair_queue):
@@ -696,19 +840,32 @@ def run_semantic_extraction(
             queued = repair_queue[:queue_size]
             del repair_queue[:queue_size]
             repair_batch_start = repair_requests
-            repair_results = _run_generator_with_diagnostics(generator, [
+            prompt_started = time.perf_counter()
+            repair_prompts = [
                 build_repair_prompt(order, primary["text"], validation["warnings"], config)
                 for order, primary, _semantic, validation in queued
-            ], config, diagnostic_path, "repair", repair_batch_start,
-                max_new_tokens=int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))))
+            ]
+            stage_seconds["prompt_build"] += time.perf_counter() - prompt_started
+            generation_started = time.perf_counter()
+            repair_results = _run_generator_with_diagnostics(
+                generator, repair_prompts, config, diagnostic_path, "repair", repair_batch_start,
+                max_new_tokens=int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512)))
+            )
+            stage_seconds["generation_wall"] += time.perf_counter() - generation_started
             repair_requests += len(queued)
             repair_batches += 1
             generation_rows.extend(repair_results)
             for (order, primary, _semantic, first_validation), repaired in zip(queued, repair_results):
-                semantic, parse_warnings = parse_semantic_json(
+                validation_started = time.perf_counter()
+                candidate, parse_warnings = parse_semantic_json(
                     repaired["text"], preserve_overflow=True
                 )
-                semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
+                semantic, validation, trace = _validate_with_sanitation(order, candidate, parse_warnings)
+                stage_seconds["validation"] += time.perf_counter() - validation_started
+                queue_private_audit(
+                    order, "repair", candidate, parse_warnings, repaired,
+                    semantic, validation, trace,
+                )
                 _append_diagnostic(diagnostic_path, {
                     "event": "model_result", "ts": _utc_now(), "phase": "repair",
                     "order_ref": _diagnostic_identity(order),
@@ -734,18 +891,29 @@ def run_semantic_extraction(
     for batch_start in range(0, len(ordered_pending), batch_size):
         indexed_batch = ordered_pending[batch_start:batch_start + batch_size]
         batch = [order for _index, order in indexed_batch]
+        prompt_started = time.perf_counter()
+        primary_prompts = [build_semantic_prompt(order, config) for order in batch]
+        stage_seconds["prompt_build"] += time.perf_counter() - prompt_started
+        generation_started = time.perf_counter()
         generated = _run_generator_with_diagnostics(
-            generator, [build_semantic_prompt(order, config) for order in batch], config,
+            generator, primary_prompts, config,
             diagnostic_path, "primary", batch_start,
         )
+        stage_seconds["generation_wall"] += time.perf_counter() - generation_started
         primary_requests += len(batch)
         primary_batches += 1
         generation_rows.extend(generated)
         for order, result in zip(batch, generated):
-            semantic, parse_warnings = parse_semantic_json(
+            validation_started = time.perf_counter()
+            candidate, parse_warnings = parse_semantic_json(
                 result["text"], preserve_overflow=True
             )
-            semantic, validation, trace = _validate_with_sanitation(order, semantic, parse_warnings)
+            semantic, validation, trace = _validate_with_sanitation(order, candidate, parse_warnings)
+            stage_seconds["validation"] += time.perf_counter() - validation_started
+            queue_private_audit(
+                order, "primary", candidate, parse_warnings, result,
+                semantic, validation, trace,
+            )
             repair_requested = validation["status"] == "repair_required" and int(config.get("max_repairs_per_order", 1)) > 0
             _append_diagnostic(diagnostic_path, {
                 "event": "model_result", "ts": _utc_now(), "phase": "primary",
@@ -781,7 +949,13 @@ def run_semantic_extraction(
 
         processed_since_checkpoint += len(batch)
         if processed_since_checkpoint >= checkpoint_every or batch_start + batch_size >= len(ordered_pending):
+            # Persist private attempts before marking semantic records complete.
+            # A crash may cause a later duplicate attempt in the append-only
+            # ledger, but it must never leave a checkpointed record unaudited.
+            flush_private_audit()
+            write_started = time.perf_counter()
             _append_jsonl(partial_path, records[persisted_record_count:])
+            stage_seconds["artifact_write"] += time.perf_counter() - write_started
             persisted_record_count = len(records)
             processed_since_checkpoint = 0
             _atomic_json(checkpoint_path, {
@@ -789,10 +963,13 @@ def run_semantic_extraction(
                 "prompt_version": prompt_version, "model": model_id, "updated_at": _utc_now(),
             })
 
+    flush_private_audit()
+    write_started = time.perf_counter()
     _append_jsonl(partial_path, records[persisted_record_count:])
     output_path.parent.mkdir(parents=True, exist_ok=True)
     os.replace(partial_path, output_path)
     _write_jsonl(rejects_path, rejects)
+    stage_seconds["artifact_write"] += time.perf_counter() - write_started
     elapsed = time.time() - started_wall
     finish_reasons = Counter(row["finish_reason"] for row in generation_rows)
     input_tokens = [row["input_tokens"] for row in generation_rows]
@@ -804,7 +981,13 @@ def run_semantic_extraction(
     }
     run_report = {
         "model": model_id,
+        "run_attempt_id": run_attempt_id,
         "prompt_version": prompt_version,
+        "validator_version": VALIDATOR_VERSION,
+        "projection_version": PROJECTION_VERSION,
+        "decoder_contract_version": str(
+            config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
+        ),
         "backend": backend,
         "dtype": os.environ.get("SEMANTIC_LLM_DTYPE", "auto"),
         "batch_size": batch_size,
@@ -834,6 +1017,10 @@ def run_semantic_extraction(
         "elapsed_seconds": round(elapsed, 3),
         "orders_per_second": round(len(pending) / elapsed, 4) if elapsed else 0.0,
         "model_latency_seconds": round(sum(row["latency_ms"] for row in generation_rows) / 1000, 3),
+        "stage_seconds": {
+            name: round(seconds, 3) for name, seconds in stage_seconds.items()
+        },
+        "unaccounted_seconds": round(max(0.0, elapsed - sum(stage_seconds.values())), 3),
         "output_tokens_per_second": round(
             sum(output_tokens) / (sum(row["latency_ms"] for row in generation_rows) / 1000), 3
         ) if generation_rows and sum(row["latency_ms"] for row in generation_rows) else 0.0,
@@ -847,13 +1034,28 @@ def run_semantic_extraction(
         "gpu_peak_reserved_gb": gpu_memory["peak_reserved_gb"],
         "empty_cache_between_batches": bool(config.get("empty_cache_between_batches", True)),
         "diagnostic_log": str(diagnostic_path),
+        "private_candidate_ledger": str(candidate_ledger_path) if candidate_ledger_path else "",
+        "private_decision_ledger": str(decision_ledger_path) if decision_ledger_path else "",
+        "candidate_entries_before_run": candidate_entries_before_run,
+        "decision_entries_before_run": decision_entries_before_run,
+        "candidate_entries_written": candidate_entries_written,
+        "decision_entries_written": decision_entries_written,
     }
     _append_diagnostic(diagnostic_path, {
         "event": "run_completed", "ts": _utc_now(),
         "records_written": len(records), "rejects_written": len(rejects),
         "primary_requests": primary_requests, "repair_requests": repair_requests,
         "primary_batches": primary_batches, "repair_batches": repair_batches,
-        "elapsed_seconds": round(elapsed, 3), **gpu_memory,
+        "elapsed_seconds": round(elapsed, 3),
+        "stage_seconds": {
+            name: round(seconds, 3) for name, seconds in stage_seconds.items()
+        },
+        "run_attempt_id": run_attempt_id,
+        "candidate_entries_before_run": candidate_entries_before_run,
+        "decision_entries_before_run": decision_entries_before_run,
+        "candidate_entries_written": candidate_entries_written,
+        "decision_entries_written": decision_entries_written,
+        **gpu_memory,
     })
     _atomic_json(run_report_path, run_report)
     _atomic_json(quality_report_path, _quality_report(records, rejects))
@@ -877,6 +1079,14 @@ def parse_args(argv=None):
     parser.add_argument("--retry-rejected", action="store_true")
     parser.add_argument("--doc-id-file")
     parser.add_argument("--diagnostic-log", default="")
+    parser.add_argument(
+        "--candidate-ledger", default="",
+        help="Optional private pre-sanitation candidate JSONL; contains evidence and must not be shared.",
+    )
+    parser.add_argument(
+        "--decision-ledger", default="",
+        help="Optional private validator decision JSONL; must not be shared.",
+    )
     parser.add_argument("--allow-raw-tsv", action="store_true")
     return parser.parse_args(argv)
 
@@ -904,6 +1114,8 @@ def main(argv=None):
         args.model_path, config, limit=args.limit, resume=args.resume,
         retry_rejected=args.retry_rejected, doc_ids=doc_ids,
         diagnostic_path=args.diagnostic_log or None,
+        candidate_ledger_path=args.candidate_ledger or None,
+        decision_ledger_path=args.decision_ledger or None,
     )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 

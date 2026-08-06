@@ -188,6 +188,7 @@ class TestSagDbBuild(unittest.TestCase):
                         "source_channel": "llm",
                         "confidence": 0.8,
                         "matched_text": "卖菜摊子",
+                        "projection_version": "sag_semantic_projection_v1",
                     },
                     ensure_ascii=False,
                 )
@@ -200,14 +201,16 @@ class TestSagDbBuild(unittest.TestCase):
             conn = duckdb.connect(str(db_path))
             rows = conn.execute(
                 """
-                select entity_type, entity_value, source_channel
+                select entity_type, entity_value, source_channel, projection_version
                 from sag_event_entity_links
                 where doc_id = ? and source_channel = 'llm'
                 """,
                 [order["doc_id"]],
             ).fetchall()
 
-        self.assertEqual(rows, [("problem_object", "流动摊贩", "llm")])
+        self.assertEqual(rows, [(
+            "problem_object", "流动摊贩", "llm", "sag_semantic_projection_v1"
+        )])
 
     def test_build_db_stores_semantic_event_and_discourse(self):
         _skip_without_duckdb(self)
@@ -218,11 +221,13 @@ class TestSagDbBuild(unittest.TestCase):
             "doc_id": order["doc_id"],
             "event": {"summary": "市民反映和平路路灯不亮"},
             "validation": {"status": "accepted"},
+            "projection_version": "sag_semantic_projection_v1",
         }
         discourse = {
             "doc_id": order["doc_id"], "declared_intent":"求助",
             "inferred_intents_json":"[\"求助\"]", "intent_conflict":"false",
             "emotions_json":"[]", "satisfaction":"unknown", "urgency":"normal",
+            "projection_version":"sag_semantic_projection_v1",
         }
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "semantic.duckdb"
@@ -232,10 +237,18 @@ class TestSagDbBuild(unittest.TestCase):
                 discourse_by_doc={order["doc_id"]: discourse},
             )
             with duckdb.connect(str(db_path)) as conn:
-                event_text = conn.execute("select event_text from sag_events where doc_id = ?", [order["doc_id"]]).fetchone()[0]
-                values = conn.execute("select declared_intent, satisfaction, urgency from sag_event_discourse where doc_id = ?", [order["doc_id"]]).fetchone()
+                event_text, event_projection = conn.execute(
+                    "select event_text, projection_version from sag_events where doc_id = ?",
+                    [order["doc_id"]],
+                ).fetchone()
+                values = conn.execute(
+                    "select declared_intent, satisfaction, urgency, projection_version "
+                    "from sag_event_discourse where doc_id = ?",
+                    [order["doc_id"]],
+                ).fetchone()
         self.assertEqual(event_text, "市民反映和平路路灯不亮")
-        self.assertEqual(values, ("求助", "unknown", "normal"))
+        self.assertEqual(event_projection, "sag_semantic_projection_v1")
+        self.assertEqual(values, ("求助", "unknown", "normal", "sag_semantic_projection_v1"))
 
 
 if __name__ == "__main__":

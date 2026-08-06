@@ -28,6 +28,8 @@ for batch_size in $BATCH_SIZES; do
   OUTPUT="$run_dir/semantic.jsonl" REJECTS="$run_dir/rejects.jsonl" \
   RUN_REPORT="$run_dir/run.json" QUALITY_REPORT="$run_dir/quality.json" \
   DIAGNOSTIC_LOG="$run_dir/diagnostics.jsonl" \
+  CANDIDATE_LEDGER="$run_dir/candidates.private.jsonl" \
+  DECISION_LEDGER="$run_dir/decisions.private.jsonl" \
   bash scripts/extract_semantics_qwen3_4b.sh >"$run_dir/console.log" 2>&1
   status=$?
   set -e
@@ -52,6 +54,7 @@ keys = (
     "primary_batches", "repair_requests", "repair_batches",
     "truncation_count", "elapsed_seconds", "orders_per_second",
     "output_tokens_per_second", "gpu_peak_allocated_gb", "gpu_peak_reserved_gb",
+    "validator_version", "projection_version", "decoder_contract_version", "stage_seconds",
     "attn_implementation", "cache_implementation", "prefix_caching",
     "chunked_prefill", "enforce_eager",
 )
