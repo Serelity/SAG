@@ -8,6 +8,9 @@ nav { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; 
 nav input { width: 5.5rem; }
 main { max-width: 1400px; margin: 1rem auto 4rem; padding: 0 1rem; display: grid; gap: 1rem; }
 section, fieldset, .issue-card { background: white; border: 1px solid #d5dde5; border-radius: 8px; padding: 1rem; }
+.ai-assisted-banner { display: flex; gap: .7rem; align-items: flex-start; border: 2px solid #d28a00; background: #fff4cf; color: #5d3b00; line-height: 1.55; }
+.ai-assisted-banner[hidden] { display: none; }
+.ai-assisted-banner strong { white-space: nowrap; }
 .guide { border-color: #8bb7d8; background: #f3f9fd; }
 .guide summary, .metadata-details summary { cursor: pointer; font-weight: 700; color: #174d77; }
 .guide-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: .75rem; margin-top: .9rem; }

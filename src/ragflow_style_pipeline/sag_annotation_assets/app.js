@@ -304,6 +304,7 @@ function render() {
   selectedEvidence = null;
   $("record-index").value = record.index + 1;
   $("record-total").textContent = `/ ${record.records}`;
+  $("ai-assisted-banner").hidden = record.review_mode !== "ai_assisted_silver";
   $("subset").textContent = SUBSET_LABELS[record.subset] || "抽样记录";
   $("previous").disabled = record.index === 0;
   $("next").disabled = record.index + 1 === record.records;

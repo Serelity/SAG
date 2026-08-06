@@ -97,6 +97,8 @@ class TestAnnotationWorkbench(unittest.TestCase):
             original = path.read_bytes()
             store = AnnotationStore(path, expected_annotator="annotator-a")
             record = store.record(0)
+            self.assertEqual(record["review_mode"], "independent_human")
+            self.assertEqual(store.summary()["review_mode"], "independent_human")
             self.assertNotIn("doc_id", record)
             self.assertNotIn("content_hash", record)
             self.assertNotIn("manifest_provenance", record)
@@ -131,6 +133,28 @@ class TestAnnotationWorkbench(unittest.TestCase):
             self.assertFalse(validation["errors_present"])
             with self.assertRaisesRegex(AnnotationStoreError, "annotation_revision_conflict"):
                 store.save(1, old_revision, self._payload(status="in_progress"))
+
+    def test_exposes_only_safe_ai_assisted_review_mode(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = self._round_file(Path(tmpdir))
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+            for row in rows:
+                row["ai_assistance_provenance"] = {
+                    "schema": "sag_ai_assistance_provenance_v1",
+                    "designation": "ai_assisted_silver_only",
+                    "human_gold_claim_allowed": False,
+                    "packet_sha256": "sha256:" + "a" * 64,
+                    "candidate_sha256": "sha256:" + "b" * 64,
+                }
+            path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+                encoding="utf-8",
+            )
+            store = AnnotationStore(path, expected_annotator="annotator-a")
+            self.assertEqual(store.summary()["review_mode"], "ai_assisted_silver")
+            record = store.record(0)
+            self.assertEqual(record["review_mode"], "ai_assisted_silver")
+            self.assertNotIn("ai_assistance_provenance", record)
 
     def test_rejects_external_change_and_payload_source_injection(self):
         with tempfile.TemporaryDirectory() as tmpdir:

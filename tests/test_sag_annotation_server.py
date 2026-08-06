@@ -112,6 +112,7 @@ class TestAnnotationServer(unittest.TestCase):
         decoded_html = html.decode("utf-8")
         self.assertIn("第一次使用？点这里看填写步骤", decoded_html)
         self.assertIn("事实与诉求单元", decoded_html)
+        self.assertIn("这是 AI 预填候选，不是人工金标", decoded_html)
         status, _headers, javascript = self._request(
             "GET", "/app.js", headers={"Cookie": cookie}
         )

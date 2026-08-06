@@ -122,6 +122,15 @@ class AnnotationStore:
         if not self.path.is_file() or _sha256_bytes(self.path.read_bytes()) != self._revision:
             raise AnnotationStoreError("annotation_file_changed_externally")
 
+    def _review_mode(self):
+        assisted = all(
+            isinstance(row.get("ai_assistance_provenance"), dict)
+            and row["ai_assistance_provenance"].get("designation") == "ai_assisted_silver_only"
+            and row["ai_assistance_provenance"].get("human_gold_claim_allowed") is False
+            for row in self._rows
+        )
+        return "ai_assisted_silver" if assisted else "independent_human"
+
     def summary(self):
         with self._lock:
             counts = {"in_progress": 0, "completed": 0}
@@ -131,6 +140,7 @@ class AnnotationStore:
             return {
                 "records": len(self._rows),
                 "status_counts": counts,
+                "review_mode": self._review_mode(),
                 "revision": self._revision,
             }
 
@@ -144,6 +154,7 @@ class AnnotationStore:
                 "index": index,
                 "records": len(self._rows),
                 "subset": row.get("subset", ""),
+                "review_mode": self._review_mode(),
                 "clean_fields": deepcopy(row.get("clean_fields", {})),
                 "metadata": {
                     key: metadata[key] for key in _METADATA_KEYS
