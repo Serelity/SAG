@@ -10,6 +10,7 @@ from ragflow_style_pipeline.sag_semantic_audit import (
     compare_gold_annotations,
     evaluate_semantic_gold,
     merge_adjudicated_gold,
+    prepare_annotation_round,
     profile_semantic_input,
     project_gold_issues,
     replay_candidate_ledger,
@@ -187,6 +188,52 @@ class TestSemanticAudit(unittest.TestCase):
         self.assertTrue(all(row["annotation"]["status"] == "unlabeled" for row in packet))
         self.assertTrue(all(row["clean_fields"]["case_content_clean"] for row in packet))
 
+    def test_prepare_annotation_round_requires_pristine_packet_and_isolates_copies(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "orders.jsonl"
+            manifest_path = root / "manifest.private.jsonl"
+            packet_path = root / "packet.private.jsonl"
+            self._write_orders(source)
+            manifest, _report = build_eval_manifest(
+                source, production_size=2, challenge_size=1, seed="annotation-round"
+            )
+            manifest_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in manifest),
+                encoding="utf-8",
+            )
+            packet = build_private_annotation_packet(source, manifest_path)
+            packet_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in packet),
+                encoding="utf-8",
+            )
+            left, right, report = prepare_annotation_round(
+                packet_path, "annotator-a", "annotator-b"
+            )
+            packet[0]["annotation"]["status"] = "in_progress"
+            packet_path.write_text(
+                "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in packet),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "annotation_packet_not_pristine"):
+                prepare_annotation_round(packet_path, "annotator-a", "annotator-b")
+        self.assertEqual(len(left), 3)
+        self.assertEqual(len(right), 3)
+        self.assertEqual(report["records_per_annotator"], 3)
+        self.assertEqual(report["annotator_count"], 2)
+        self.assertEqual({row["annotation"]["annotator"] for row in left}, {"annotator-a"})
+        self.assertEqual({row["annotation"]["annotator"] for row in right}, {"annotator-b"})
+        self.assertEqual({row["annotation"]["status"] for row in left + right}, {"in_progress"})
+        self.assertEqual(
+            {row["annotation_round_provenance"]["round_id"] for row in left + right},
+            {report["round_id"]},
+        )
+        left[0]["issues"].append({"private": "left-only"})
+        self.assertEqual(right[0]["issues"], [])
+        serialized_report = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn("annotator-a", serialized_report)
+        self.assertNotIn("order_secret", serialized_report)
+
     def _completed_annotation(self, annotator="annotator-a"):
         return {
             "schema": "sag_issue_gold_v2",
@@ -198,6 +245,11 @@ class TestSemanticAudit(unittest.TestCase):
                 "schema": "sag_semantic_eval_manifest_v2",
                 "records": 1,
                 "content_sha256": "sha256:" + "a" * 64,
+            },
+            "annotation_round_provenance": {
+                "schema": "sag_issue_annotation_round_v1",
+                "round_id": "test-round",
+                "source_packet_sha256": "sha256:" + "b" * 64,
             },
             "clean_fields": {
                 "title_clean": "",

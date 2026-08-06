@@ -7,12 +7,14 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
+from copy import deepcopy
 from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import _semantic_payload
 from ragflow_style_pipeline.sag_semantic_versions import (
     ADJUDICATION_MERGE_VERSION,
     ANNOTATION_AGREEMENT_VERSION,
+    ANNOTATION_ROUND_VERSION,
     CANDIDATE_LEDGER_VERSION,
     DECISION_LEDGER_VERSION,
     EVAL_MANIFEST_VERSION,
@@ -447,6 +449,65 @@ def build_private_annotation_packet(input_path, manifest_path):
     return packet
 
 
+def prepare_annotation_round(packet_path, left_annotator, right_annotator):
+    """Create two isolated in-progress annotation copies from a pristine packet."""
+    left_annotator = _text(left_annotator).strip()
+    right_annotator = _text(right_annotator).strip()
+    if not left_annotator or not right_annotator or left_annotator == right_annotator:
+        raise ValueError("annotation_round_requires_distinct_annotators")
+    validation = validate_gold_annotations(packet_path)
+    if validation["errors_present"] or not validation["records_read"]:
+        raise ValueError("annotation_packet_invalid")
+    rows, parse_errors = _load_annotation_rows(packet_path)
+    if parse_errors:
+        raise ValueError("annotation_packet_invalid")
+    for row in rows:
+        annotation = row.get("annotation") if isinstance(row.get("annotation"), dict) else {}
+        if (
+            annotation.get("status") != "unlabeled"
+            or _text(annotation.get("annotator"))
+            or row.get("issues") != []
+            or row.get("declared_intents") != []
+            or row.get("direct_emotions") != []
+            or row.get("satisfaction") != {"label": "unknown", "target": "", "evidence": ""}
+            or row.get("urgency") != {"level": "normal", "evidence": ""}
+            or "annotation_round_provenance" in row
+            or "adjudication_provenance" in row
+        ):
+            raise ValueError("annotation_packet_not_pristine")
+
+    packet_hash = _file_sha256(packet_path)
+    round_id = _sha("\u241f".join((
+        packet_hash, *sorted((left_annotator, right_annotator))
+    )))[:16]
+
+    def make_rows(annotator):
+        output = deepcopy(rows)
+        for row in output:
+            row["annotation"] = {
+                "annotator": annotator,
+                "status": "in_progress",
+                "notes": "",
+            }
+            row["annotation_round_provenance"] = {
+                "schema": ANNOTATION_ROUND_VERSION,
+                "round_id": round_id,
+                "source_packet_sha256": packet_hash,
+            }
+        return output
+
+    report = {
+        "schema": ANNOTATION_ROUND_VERSION,
+        "gold_schema": GOLD_SCHEMA_VERSION,
+        "private_source": True,
+        "source_packet_sha256": packet_hash,
+        "round_id": round_id,
+        "records_per_annotator": len(rows),
+        "annotator_count": 2,
+    }
+    return make_rows(left_annotator), make_rows(right_annotator), report
+
+
 def _load_annotation_rows(path):
     rows = []
     parse_errors = Counter()
@@ -869,6 +930,7 @@ def _private_conflict_row(left, right, reasons, source_provenance):
         "content_hash": left.get("content_hash", ""),
         "subset": left.get("subset", ""),
         "manifest_provenance": left.get("manifest_provenance", {}),
+        "annotation_round_provenance": left.get("annotation_round_provenance", {}),
         "source_provenance": source_provenance,
         "clean_fields": left.get("clean_fields", {}),
         "metadata": left.get("metadata", {}),
@@ -924,6 +986,28 @@ def compare_gold_annotations(left_path, right_path, left_annotator="", right_ann
     }
     if left_index.keys() != right_index.keys():
         raise ValueError("annotation_identity_sets_differ")
+    round_provenances = {
+        _stable_json(row.get("annotation_round_provenance"))
+        for row in left_rows + right_rows
+        if isinstance(row.get("annotation_round_provenance"), dict)
+    }
+    expected_round_records = len(left_rows) + len(right_rows)
+    actual_round_records = sum(
+        isinstance(row.get("annotation_round_provenance"), dict)
+        for row in left_rows + right_rows
+    )
+    if actual_round_records != expected_round_records or len(round_provenances) != 1:
+        raise ValueError("annotation_round_provenance_missing_or_mixed")
+    round_provenance = left_rows[0]["annotation_round_provenance"]
+    if (
+        round_provenance.get("schema") != ANNOTATION_ROUND_VERSION
+        or not _text(round_provenance.get("round_id"))
+        or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            _text(round_provenance.get("source_packet_sha256")),
+        )
+    ):
+        raise ValueError("annotation_round_provenance_invalid")
     left_annotators = {
         _text(row.get("annotation", {}).get("annotator")) for row in left_rows
     }
@@ -951,7 +1035,8 @@ def compare_gold_annotations(left_path, right_path, left_annotator="", right_ann
         left = left_index[identity]
         right = right_index[identity]
         if any(left.get(key) != right.get(key) for key in (
-            "subset", "manifest_provenance", "clean_fields", "metadata"
+            "subset", "manifest_provenance", "annotation_round_provenance",
+            "clean_fields", "metadata",
         )):
             raise ValueError("annotation_source_payloads_differ")
         left_frames = _grounded_issue_frames(left)
@@ -1094,8 +1179,9 @@ def merge_adjudicated_gold(
             provided = provided_index[identity]
             immutable_keys = (
                 "schema", "private", "doc_id", "content_hash", "subset",
-                "manifest_provenance", "source_provenance", "clean_fields",
-                "metadata", "conflict_reasons", "left", "right",
+                "manifest_provenance", "annotation_round_provenance",
+                "source_provenance", "clean_fields", "metadata",
+                "conflict_reasons", "left", "right",
             )
             if any(provided.get(key) != expected.get(key) for key in immutable_keys):
                 raise ValueError("conflict_source_payload_changed")

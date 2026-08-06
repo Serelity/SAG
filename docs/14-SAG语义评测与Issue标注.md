@@ -125,6 +125,20 @@ PYTHONPATH=src python scripts/build_private_annotation_packet.py \
 
 ### 4.3 本地验证、双标一致性与仲裁
 
+不要手工复制空 packet。先用工具从 pristine `unlabeled` 包确定性生成彼此隔离的 A/B 文件；packet、A、B 和 report 路径必须不同：
+
+```bash
+PYTHONPATH=src python scripts/prepare_semantic_annotation_round.py \
+  --packet "$PRIVATE_ROOT/audit/eval.annotation.private.jsonl" \
+  --left-annotator annotator-a \
+  --right-annotator annotator-b \
+  --left-output "$PRIVATE_ROOT/audit/eval.annotator-a.private.jsonl" \
+  --right-output "$PRIVATE_ROOT/audit/eval.annotator-b.private.jsonl" \
+  --report "$PRIVATE_ROOT/audit/eval.annotation-round.safe.json"
+```
+
+工具冻结 source packet SHA-256 和 round ID，并把两份状态置为 `in_progress`。compare 会拒绝 provenance 缺失、轮次混用或来源不同的 A/B 文件。
+
 完成一份标注后先做严格验证。safe report 不含正文、evidence、doc_id 或标注者姓名：
 
 ```bash
