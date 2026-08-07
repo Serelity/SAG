@@ -432,13 +432,19 @@ class TestSemanticLlm(unittest.TestCase):
             sys.modules, {"torch": fake_torch, "vllm": fake_vllm},
         ), patch.dict(os.environ, {}, clear=False):
             generator = load_vllm_generator(tmpdir, enable_thinking=False)
-            rows = generator(["工单一", "工单二"], max_new_tokens=640, temperature=0.0)
+            structured = [
+                {"role": "system", "content": "系统规则"},
+                {"role": "user", "content": "工单一"},
+            ]
+            rows = generator([structured, "工单二"], max_new_tokens=640, temperature=0.0)
         self.assertEqual(captured["engine"]["dtype"], "float16")
         self.assertEqual(captured["engine"]["max_num_seqs"], 64)
         self.assertFalse(captured["engine"]["enable_prefix_caching"])
         self.assertFalse(captured["engine"]["enable_chunked_prefill"])
         self.assertFalse(captured["engine"]["enforce_eager"])
-        self.assertEqual(captured["generate"][0], ["templated:工单一", "templated:工单二"])
+        self.assertEqual(captured["templates"][0][0], structured)
+        self.assertEqual(captured["templates"][1][0], [{"role": "user", "content": "工单二"}])
+        self.assertEqual(captured["generate"][0], ["templated:系统规则", "templated:工单二"])
         self.assertEqual(captured["generate"][1], {"temperature":0.0, "max_tokens":640})
         self.assertFalse(captured["generate"][2])
         self.assertEqual(len(rows), 2)

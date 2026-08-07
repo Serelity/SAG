@@ -37,7 +37,12 @@ class TestSummarizeSemanticDiagnostics(unittest.TestCase):
                         "roads": 0,
                         "intersections": 0,
                         "pois": 1,
-                    }
+                    },
+                    "issues": {
+                        "issues": 2, "objects": 2, "problem_behaviors": 2,
+                        "question_focus": 0, "request_actions": 2,
+                        "roads": 1, "intersections": 0, "pois": 1,
+                    },
                 },
             },
             {
@@ -78,6 +83,8 @@ class TestSummarizeSemanticDiagnostics(unittest.TestCase):
         self.assertEqual(result["sanitation_actions"], {"dropped_invalid_candidate:entities.roads.0": 1})
         self.assertEqual(result["input_tokens_total"], 100)
         self.assertEqual(result["output_tokens_total"], 40)
+        self.assertEqual(result["issue_counts_after_sanitation"]["issues"], 2)
+        self.assertEqual(result["issue_counts_after_sanitation"]["request_actions"], 2)
         self.assertEqual(result["memory_by_batch"][0]["peak_reserved_gb"], 13.0)
         self.assertEqual(result["failure_counts"], {})
         self.assertEqual(result["last_event"], "run_completed")

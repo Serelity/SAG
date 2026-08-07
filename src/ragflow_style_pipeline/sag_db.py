@@ -52,6 +52,10 @@ SAG_EVENT_COLUMNS = [
     "event_month",
     "event_source",
     "event_status",
+    "event_kind",
+    "issue_index",
+    "time_scope",
+    "validation_status",
     "projection_version",
 ]
 
@@ -69,6 +73,7 @@ SAG_LINK_COLUMNS = [
     "source_channel",
     "confidence",
     "matched_text",
+    "semantic_role",
     "validation_status",
     "prompt_version",
     "projection_version",
@@ -203,6 +208,10 @@ def event_row(source_order):
         "event_month": source_order.get("call_month", ""),
         "event_source": "t_order_master",
         "event_status": source_order.get("order_status", ""),
+        "event_kind": "order",
+        "issue_index": "",
+        "time_scope": "current",
+        "validation_status": "",
         "projection_version": "",
     }
 
@@ -282,8 +291,8 @@ def load_entity_links_jsonl(path):
     return links_by_doc
 
 
-def load_rows_jsonl_by_doc(path):
-    """Load object JSONL keyed by doc_id without printing source content."""
+def load_rows_jsonl_grouped_by_doc(path):
+    """Load JSONL grouped by doc_id while preserving issue-event multiplicity."""
     rows = {}
     path = Path(path)
     if not path.exists():
@@ -295,8 +304,16 @@ def load_rows_jsonl_by_doc(path):
             row = json.loads(line)
             if not isinstance(row, dict) or not clean_value(row.get("doc_id")):
                 raise ValueError(f"line_{line_number}:missing_doc_id")
-            rows[clean_value(row["doc_id"])] = row
+            rows.setdefault(clean_value(row["doc_id"]), []).append(row)
     return rows
+
+
+def load_rows_jsonl_by_doc(path):
+    """Backward-compatible last-row loader for single-row integrations."""
+    return {
+        doc_id: values[-1]
+        for doc_id, values in load_rows_jsonl_grouped_by_doc(path).items()
+    }
 
 
 def _link_value(link, name, default=""):
@@ -317,75 +334,124 @@ def build_sag_db_from_orders(
 
     started_at = time.time()
     source_orders = list(source_orders)
-    events = [event_row(order) for order in source_orders]
+    base_by_doc = {order["doc_id"]: event_row(order) for order in source_orders}
+    events = []
+    for order in source_orders:
+        doc_id = order["doc_id"]
+        base = base_by_doc[doc_id]
+        raw_overrides = (semantic_events_by_doc or {}).get(doc_id, [])
+        overrides = raw_overrides if isinstance(raw_overrides, list) else [raw_overrides]
+        overrides = [value for value in overrides if isinstance(value, dict)]
+        if not overrides:
+            events.append(base)
+            continue
+        for override in overrides:
+            validation = override.get("validation") if isinstance(override.get("validation"), dict) else {}
+            semantic_event = override.get("event") if isinstance(override.get("event"), dict) else {}
+            status = clean_value(override.get("validation_status")) or clean_value(validation.get("status"))
+            summary = clean_value(override.get("event_text")) or clean_value(semantic_event.get("summary"))
+            event = dict(base)
+            event.update({
+                "event_id": clean_value(override.get("event_id")) or base["event_id"],
+                "event_kind": clean_value(override.get("event_kind")) or "order",
+                "issue_index": clean_value(override.get("issue_index")),
+                "time_scope": clean_value(override.get("time_scope")) or "current",
+                "validation_status": status,
+                "projection_version": clean_value(override.get("projection_version")),
+            })
+            if summary and status in {"accepted", "accepted_with_warnings"}:
+                event["event_text"] = summary
+            events.append(event)
+    events_by_doc = {}
+    event_by_id = {}
     for event in events:
-        override = (semantic_events_by_doc or {}).get(event["doc_id"], {})
-        validation = override.get("validation") if isinstance(override.get("validation"), dict) else {}
-        semantic_event = override.get("event") if isinstance(override.get("event"), dict) else {}
-        status = clean_value(override.get("validation_status")) or clean_value(validation.get("status"))
-        summary = clean_value(override.get("event_text")) or clean_value(semantic_event.get("summary"))
-        if summary and status in {"accepted", "accepted_with_warnings"}:
-            event["event_text"] = summary
-        event["projection_version"] = clean_value(override.get("projection_version"))
-    event_by_doc = {event["doc_id"]: event for event in events}
+        events_by_doc.setdefault(event["doc_id"], []).append(event)
+        event_by_id[event["event_id"]] = event
 
     entity_rows_by_key = {}
     link_rows = []
+    seen_links = set()
+
+    def append_link(link, event_id, fallback_doc_id):
+        doc_id = clean_value(_link_value(link, "doc_id")) or fallback_doc_id
+        entity_type = clean_value(_link_value(link, "entity_type"))
+        entity_value = clean_value(_link_value(link, "entity_value"))
+        normalized_value = clean_value(_link_value(link, "normalized_value")) or entity_value
+        source_field = clean_value(_link_value(link, "source_field"))
+        source_channel = clean_value(_link_value(link, "source_channel")) or "llm"
+        matched_text = clean_value(_link_value(link, "matched_text")) or entity_value
+        key = (
+            event_id, entity_type, normalized_value, source_field,
+            source_channel, matched_text,
+        )
+        if not event_id or event_id not in event_by_id or not entity_type or not normalized_value or key in seen_links:
+            return
+        seen_links.add(key)
+        entity_id = _entity_id(entity_type, normalized_value)
+        entity_key = (entity_type, normalized_value)
+        entity_rows_by_key.setdefault(entity_key, {
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "entity_value": entity_value or normalized_value,
+            "normalized_value": normalized_value,
+        })
+        confidence = _link_value(link, "confidence", None)
+        link_rows.append({
+            "event_id": event_id,
+            "doc_id": doc_id,
+            "entity_id": entity_id,
+            "entity_type": entity_type,
+            "entity_value": entity_value or normalized_value,
+            "surface_form": clean_value(_link_value(link, "surface_form")) or entity_value or normalized_value,
+            "normalized_value": normalized_value,
+            "source_field": source_field,
+            "source_channel": source_channel,
+            "confidence": "" if confidence is None else str(confidence),
+            "matched_text": matched_text,
+            "semantic_role": clean_value(_link_value(link, "semantic_role")),
+            "validation_status": clean_value(_link_value(link, "validation_status")),
+            "prompt_version": clean_value(_link_value(link, "prompt_version")),
+            "projection_version": clean_value(_link_value(link, "projection_version")),
+        })
+
     for order in source_orders:
-        rule_links = extract_entities_from_order(order)
-        extra_links = (extra_entity_links_by_doc or {}).get(order["doc_id"], [])
-        # Rule links remain dataclasses; external semantic links remain dictionaries so
-        # provenance fields and the deliberate absence of model confidence survive.
-        combined = list(deduplicate_entity_links(rule_links)) + list(extra_links)
-        seen_links = set()
-        for link in combined:
-            doc_id = clean_value(_link_value(link, "doc_id")) or order["doc_id"]
-            entity_type = clean_value(_link_value(link, "entity_type"))
-            entity_value = clean_value(_link_value(link, "entity_value"))
-            normalized_value = clean_value(_link_value(link, "normalized_value")) or entity_value
-            source_field = clean_value(_link_value(link, "source_field"))
-            source_channel = clean_value(_link_value(link, "source_channel")) or "llm"
-            matched_text = clean_value(_link_value(link, "matched_text")) or entity_value
-            key = (doc_id, entity_type, normalized_value, source_field, source_channel, matched_text)
-            if not entity_type or not normalized_value or key in seen_links:
-                continue
-            seen_links.add(key)
-            entity_id = _entity_id(entity_type, normalized_value)
-            entity_key = (entity_type, normalized_value)
-            entity_rows_by_key.setdefault(entity_key, {
-                "entity_id": entity_id,
-                "entity_type": entity_type,
-                "entity_value": entity_value or normalized_value,
-                "normalized_value": normalized_value,
-            })
-            event = event_by_doc.get(doc_id, {})
-            confidence = _link_value(link, "confidence", None)
-            link_rows.append({
-                "event_id": event.get("event_id", ""),
-                "doc_id": doc_id,
-                "entity_id": entity_id,
-                "entity_type": entity_type,
-                "entity_value": entity_value or normalized_value,
-                "surface_form": clean_value(_link_value(link, "surface_form")) or entity_value or normalized_value,
-                "normalized_value": normalized_value,
-                "source_field": source_field,
-                "source_channel": source_channel,
-                "confidence": "" if confidence is None else str(confidence),
-                "matched_text": matched_text,
-                "validation_status": clean_value(_link_value(link, "validation_status")),
-                "prompt_version": clean_value(_link_value(link, "prompt_version")),
-                "projection_version": clean_value(_link_value(link, "projection_version")),
-            })
+        doc_id = order["doc_id"]
+        doc_events = events_by_doc.get(doc_id, [])
+        issue_aware = any(event.get("event_kind") == "issue" for event in doc_events)
+        # Reliable metadata applies to every issue. Regex text links must not be
+        # copied to every issue, otherwise issue-aware projection becomes flat again.
+        for link in deduplicate_entity_links(extract_entities_from_order(order)):
+            target_events = (
+                doc_events if not issue_aware or link.source_channel == "metadata" else []
+            )
+            for event in target_events:
+                append_link(link, event["event_id"], doc_id)
+        for link in (extra_entity_links_by_doc or {}).get(doc_id, []):
+            explicit_event = clean_value(_link_value(link, "event_id"))
+            if explicit_event:
+                append_link(link, explicit_event, doc_id)
+            elif doc_events:
+                # Legacy semantic links belong to the single order event only.
+                if not issue_aware:
+                    append_link(link, doc_events[0]["event_id"], doc_id)
 
     discourse_rows = []
-    for doc_id, row in (discourse_by_doc or {}).items():
-        if doc_id not in event_by_doc:
-            continue
-        discourse_rows.append({
-            **{column: clean_value(row.get(column)) for column in SAG_DISCOURSE_COLUMNS},
-            "event_id": event_by_doc[doc_id]["event_id"],
-            "doc_id": doc_id,
-        })
+    for doc_id, raw_rows in (discourse_by_doc or {}).items():
+        values = raw_rows if isinstance(raw_rows, list) else [raw_rows]
+        for row in values:
+            if not isinstance(row, dict):
+                continue
+            event_id = clean_value(row.get("event_id"))
+            if not event_id:
+                doc_events = events_by_doc.get(doc_id, [])
+                event_id = doc_events[0]["event_id"] if len(doc_events) == 1 else ""
+            if event_id not in event_by_id:
+                continue
+            discourse_rows.append({
+                **{column: clean_value(row.get(column)) for column in SAG_DISCOURSE_COLUMNS},
+                "event_id": event_id,
+                "doc_id": doc_id,
+            })
 
     db_path = Path(db_path)
     db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -435,8 +501,14 @@ def build_sag_db(
     """Read source rows and build SAG tables without importing model code."""
     rows = read_source_rows(input_path, limit=limit)
     extra_links = load_entity_links_jsonl(entity_links_jsonl) if entity_links_jsonl else None
-    semantic_events = load_rows_jsonl_by_doc(semantic_events_jsonl) if semantic_events_jsonl else None
-    discourse = load_rows_jsonl_by_doc(discourse_jsonl) if discourse_jsonl else None
+    semantic_events = (
+        load_rows_jsonl_grouped_by_doc(semantic_events_jsonl)
+        if semantic_events_jsonl else None
+    )
+    discourse = (
+        load_rows_jsonl_grouped_by_doc(discourse_jsonl)
+        if discourse_jsonl else None
+    )
     report = build_sag_db_from_orders(
         rows, db_path, extra_entity_links_by_doc=extra_links,
         semantic_events_by_doc=semantic_events, discourse_by_doc=discourse,

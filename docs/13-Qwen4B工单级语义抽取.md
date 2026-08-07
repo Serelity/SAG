@@ -184,3 +184,97 @@ outputs/sag_semantic.qwen3_4b.100k.duckdb
 - 只需重投影：直接运行 `project_semantics_to_sag.sh` 和 `build_sag_semantic_100k.sh`，不加载模型。
 
 回传时优先返回 checker 输出、run/quality 报告和哈希；原始响应或含正文产物只能通过受控安全通道传输。
+
+## 10. v8_dev1 最小 Issue Schema 与服务器循环
+
+`sag_semantic_v8_dev1` 是与冻结 v7 并存的开发契约，不覆盖 v7 parser、validator 或 replay。模型输出版本为 `sag_semantic_issue_output_v1`，核心结构为：
+
+```json
+{
+  "event_summary": "",
+  "issues": [{
+    "time_scope": "current",
+    "objects": [],
+    "problem_behaviors": [],
+    "question_focus": [],
+    "request_actions": [],
+    "locations": []
+  }],
+  "discourse": {
+    "intents": [],
+    "emotions": [],
+    "satisfaction": {"label":"unknown","target":"","field":"","evidence":""},
+    "urgency": {"level":"normal","field":"","evidence":""}
+  }
+}
+```
+
+一个 issue 是一个现实业务关注点，不是一个话语动作。问题事实及针对它的诉求属于同一 issue；纯咨询使用 `question_focus`，不制造 problem behavior；只有合并后会产生错误对象—行为、对象—地点或动作—对象关系时才拆 issue。模型不输出 `canonical/confidence/issue_id`。surface/evidence 是事实权威；canonical/alias 留给独立、可撤销的 normalization 层。
+
+v8 版本独立记录：
+
+- Prompt：`sag_semantic_v8_dev1`
+- 输出 schema：`sag_semantic_issue_output_v1`
+- validator：`sag_semantic_issue_validator_v1`
+- projection：`sag_semantic_issue_projection_v1`
+- decoder：`unconstrained_json_v1`
+
+每个 issue 确定性投影为独立 SAG event。`problem_object/problem_behavior/road/intersection/poi` 可作为默认 expansion frontier；`issue_predicate/request_action` 只作查询属性成员，不作为默认 frontier。可靠 metadata 复制到每个 issue；正文 regex 规则不会复制到所有 issue，避免把 issue-aware 投影重新污染为 flat。
+
+### 10.1 首轮服务器 smoke
+
+先在本地或服务器私有目录将冻结的 48 条 manifest 确定性拆成 16 条 development 与 32 条 holdout。该工具只读取 identity/stratum，不读取正文，safe report 不含 `doc_id/content_hash`：
+
+```bash
+PYTHONPATH=src python scripts/split_semantic_eval_manifest.py \
+  --source private/eval.pilot.manifest.private.jsonl \
+  --development private/eval.v8.development-16.manifest.private.jsonl \
+  --holdout private/eval.v8.holdout-32.manifest.private.jsonl \
+  --report private/eval.v8.split.safe.json \
+  --dev-size 16 --seed sag-v8-split-v1
+```
+
+只使用脱敏 inference packet 和 development manifest。`LIMIT=16` 在 exact identity 模式下不会代替 manifest split；不要把 48 条总 manifest 当作首轮 16 条。不要传原始 TSV，不连接其他数据：
+
+```bash
+conda activate sag-vllm
+export INPUT_JSONL=private/eval.pilot.inference.private.jsonl
+export IDENTITY_MANIFEST=private/eval.v8.development-16.manifest.private.jsonl
+export MODEL_PATH=models/Qwen3-4B
+export BACKEND=vllm
+export RUN_DIR=outputs/v8-dev1-smoke-001
+bash scripts/extract_semantics_v8_dev1.sh
+```
+
+入口要求显式 `INPUT_JSONL/IDENTITY_MANIFEST/MODEL_PATH`，并拒绝 `RESUME=1` 和已存在 `RUN_DIR`，防止误跑、v7/v8 或不同 Prompt 结果混用。V100 固定：
+
+```bash
+VLLM_USE_V1=0
+VLLM_ATTENTION_BACKEND=XFORMERS
+VLLM_ENABLE_PREFIX_CACHING=0
+VLLM_ENABLE_CHUNKED_PREFILL=0
+SEMANTIC_LLM_DTYPE=float16
+```
+
+v8 默认 `max_model_len=8192`、`max_num_seqs=32`，其 KV 上限与 v7 的 `4096×64` 同量级；primary `max_new_tokens=1024`、整单 repair=768。先用 batch 8；看到真实 OOM 后再降 `gpu_memory_utilization` 或 batch，不预先牺牲吞吐。只有关闭 prefix/chunked 后仍出现相同 LLVM slice layout 错误，才试 `VLLM_ENFORCE_EAGER=1`。
+
+### 10.2 首轮必须回传的安全结果
+
+只回传或汇报：
+
+- `$RUN_DIR/check.safe.json`
+- `$RUN_DIR/run.safe.json`
+- `$RUN_DIR/quality.safe.json`
+- diagnostics 聚合 summary
+- semantic/reject/candidate/decision 文件 SHA-256
+
+不要粘贴 semantic、reject、candidate、decision、Prompt、evidence 或正文。`quality.safe.json` 重点观察：
+
+- `issue_count_distribution`
+- `issue_role_coverage`
+- `status_counts/warning_counts`
+- repair/reject/truncation
+- primary/repair output token p50/p95
+- latency、orders/s、output tokens/s、GPU peak
+
+第一轮先跑冻结的 16 条 development；后续 `v8_dev2/dev3` 仍复用这 16 条，不得换 seed 重抽。根据实际 Qwen 错误迭代，不要看到单例错误就加关键词。Prompt 冻结为 RC 后才首次打开 32 条 holdout；之后再扩大到 48/100、995 和 100k。v7 与 v8 对比必须使用相同 identity、模型和输入；只改变 schema/Prompt，并保持输出目录隔离。

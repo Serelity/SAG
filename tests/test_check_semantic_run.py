@@ -46,6 +46,7 @@ class TestCheckSemanticRun(unittest.TestCase):
             rejects=str(rejects),
             run_report=str(run_report),
             quality_report=str(quality_report),
+            candidate_ledger="", decision_ledger="", diagnostics="",
         )
 
     def test_checks_identity_manifest_provenance_without_returning_doc_ids(self):
@@ -62,6 +63,19 @@ class TestCheckSemanticRun(unittest.TestCase):
             "sha256": "sha256:" + "a" * 64,
         })
         self.assertNotIn("private-doc-id", output.getvalue())
+
+    def test_optionally_hashes_private_ledgers_without_reading_their_json(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            args = self._write_artifacts(root)
+            ledger = root / "candidate.private.jsonl"
+            ledger.write_text("private arbitrary bytes\n", encoding="utf-8")
+            args.candidate_ledger = str(ledger)
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                result = check(args)
+        self.assertRegex(result["hashes"]["candidate_ledger"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotIn("private arbitrary bytes", output.getvalue())
 
     def test_rejects_identity_manifest_count_mismatch(self):
         with tempfile.TemporaryDirectory() as tmpdir:

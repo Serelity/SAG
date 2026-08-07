@@ -59,16 +59,35 @@ def check(args):
     warnings = Counter()
     repairs = 0
     finish_reasons = Counter()
+    output_schemas = Counter()
+    validator_versions = Counter()
+    projection_versions = Counter()
     for row in semantic:
         model_run = row.get("model_run") if isinstance(row.get("model_run"), dict) else {}
         validation = row.get("validation") if isinstance(row.get("validation"), dict) else {}
         identities.append((row.get("doc_id"), row.get("content_hash"), model_run.get("prompt_version"), model_run.get("model")))
         statuses[str(validation.get("status", "unknown"))] += 1
         warnings.update(str(value) for value in validation.get("warnings", []))
+        output_schemas[str(row.get("output_schema_version", "legacy"))] += 1
+        validator_versions[str(validation.get("validator_version", "unknown"))] += 1
+        artifact_versions = row.get("artifact_versions") if isinstance(row.get("artifact_versions"), dict) else {}
+        projection_versions[str(artifact_versions.get("projection", "unknown"))] += 1
         repairs += int(bool(validation.get("repair_attempted")))
         finish_reasons[str(model_run.get("finish_reason", "unknown"))] += 1
     if len(identities) != len(set(identities)):
         raise ValueError("duplicate_semantic_identity")
+    if len(output_schemas) > 1 or len(validator_versions) > 1 or len(projection_versions) > 1:
+        raise ValueError("mixed_semantic_contract_versions")
+    if semantic:
+        output_schema = next(iter(output_schemas))
+        validator_version = next(iter(validator_versions))
+        projection_version = next(iter(projection_versions))
+        if str(run.get("output_schema_version", "legacy")) != output_schema:
+            raise ValueError("output_schema_version_mismatch")
+        if str(run.get("validator_version", "unknown")) != validator_version:
+            raise ValueError("validator_version_mismatch")
+        if str(run.get("projection_version", "unknown")) != projection_version:
+            raise ValueError("projection_version_mismatch")
     expected = run.get("records_written")
     if expected is not None and int(expected) != len(semantic):
         raise ValueError(f"record_count_mismatch:{expected}:{len(semantic)}")
@@ -96,6 +115,12 @@ def check(args):
             "sha256": manifest_sha256,
         })
 
+    optional_hashes = {}
+    for name in ("candidate_ledger", "decision_ledger", "diagnostics"):
+        path = getattr(args, name, "")
+        if path:
+            optional_hashes[name] = digest(path)
+
     result = {
         "semantic_records": len(semantic),
         "reject_records": len(rejects),
@@ -103,12 +128,18 @@ def check(args):
         "warning_counts": dict(warnings),
         "repair_attempts": repairs,
         "finish_reason_counts": dict(finish_reasons),
+        "semantic_contract": {
+            "output_schema_versions": dict(output_schemas),
+            "validator_versions": dict(validator_versions),
+            "projection_versions": dict(projection_versions),
+        },
         "identity_manifest": manifest_check,
         "hashes": {
             "semantic": digest(args.semantic),
             "rejects": digest(args.rejects),
             "run_report": digest(args.run_report),
             "quality_report": digest(args.quality_report),
+            **optional_hashes,
         },
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -121,6 +152,9 @@ def parse_args(argv=None):
     parser.add_argument("--rejects", required=True)
     parser.add_argument("--run-report", required=True)
     parser.add_argument("--quality-report", required=True)
+    parser.add_argument("--candidate-ledger", default="")
+    parser.add_argument("--decision-ledger", default="")
+    parser.add_argument("--diagnostics", default="")
     return parser.parse_args(argv)
 
 

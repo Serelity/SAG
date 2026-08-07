@@ -800,3 +800,20 @@ fi
 9. 最后才运行 100k、SAG projection 和 DuckDB。
 
 在第 1–4 步完成前，最正确的下一步通常是推进标注和 Oracle，而不是继续堆 validator 规则或修改 Prompt。
+
+## 2026-08 v8_dev1 Issue Schema 更新
+
+当前主线已从过早的 relevance/Oracle 扩展回到“schema → 小批次 Qwen → 错误分类 → 迭代 → 扩大数据”。relevance 私有试验保持暂停，不作为 v8_dev1 设计的正式证据。
+
+已新增且不覆盖 v7：
+
+- `sag_semantic_issue_output_v1`
+- Prompt `sag_semantic_v8_dev1`
+- validator `sag_semantic_issue_validator_v1`
+- projection `sag_semantic_issue_projection_v1`
+- 配置 `configs/sag_semantic_extraction_qwen3_4b_v8_dev1.json`
+- 入口 `scripts/extract_semantics_v8_dev1.sh`
+
+v8 的 issue 表示一个现实业务关注点。problem/question/request 是同一 issue 内的不同角色；问题事实与针对它的诉求默认不拆 issue。模型不生成 canonical/confidence/issue_id。每个 issue 投影为独立 SAG event；question/action 不进入默认 expansion frontier。v7 parser、validator、Prompt、ledger replay 保留，可做严格 A/B。
+
+下一步只有用户在服务器运行 Qwen 小批次：先用 `scripts/split_semantic_eval_manifest.py` 和固定 seed `sag-v8-split-v1` 将 frozen 48 确定性拆成 16 development / 32 holdout；后续 dev 版本不得重抽。再用 development manifest 和全新 RUN_DIR 运行；exact identity 模式不能用 `LIMIT=16` 代替 manifest split。不要设置 RESUME。只回传 safe checker/run/quality/diagnostics summary 和文件 hash，不粘贴正文或 evidence。根据真实 primary parse、repair、reject、token、issue 数和角色/attachment 错误升级 `v8_dev2`；Prompt 冻结为 RC 后才首次打开 holdout。

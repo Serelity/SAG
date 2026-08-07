@@ -22,6 +22,8 @@ from ragflow_style_pipeline.sag_semantic_versions import (
     GOLD_SCHEMA_VERSION,
     GOLD_VALIDATION_VERSION,
     INPUT_PROFILE_VERSION,
+    ISSUE_OUTPUT_SCHEMA_VERSION,
+    ISSUE_VALIDATOR_VERSION,
     LEDGER_GOLD_AUDIT_VERSION,
     VALIDATOR_REPLAY_VERSION,
     VALIDATOR_VERSION,
@@ -1625,15 +1627,32 @@ def _read_jsonl_index(path):
 
 
 def _semantic_frontier_mentions(semantic):
+    mentions = set()
+    issues = semantic.get("issues") if isinstance(semantic, dict) else None
+    if isinstance(issues, list) and issues:
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            for group, role in (
+                ("objects", "problem_object"),
+                ("problem_behaviors", "problem_behavior"),
+            ):
+                for item in issue.get(group, []) if isinstance(issue.get(group), list) else []:
+                    mention = _normalized_mention(item)
+                    if mention:
+                        mentions.add((role, mention))
+            for item in issue.get("locations", []) if isinstance(issue.get("locations"), list) else []:
+                if not isinstance(item, dict) or item.get("type") not in {"road", "intersection", "poi"}:
+                    continue
+                mention = _normalized_mention(item)
+                if mention:
+                    mentions.add((item["type"], mention))
+        return mentions
     entities = semantic.get("entities") if isinstance(semantic, dict) else {}
     mapping = {
-        "problem_objects": "problem_object",
-        "problem_behaviors": "problem_behavior",
-        "roads": "road",
-        "intersections": "intersection",
-        "pois": "poi",
+        "problem_objects": "problem_object", "problem_behaviors": "problem_behavior",
+        "roads": "road", "intersections": "intersection", "pois": "poi",
     }
-    mentions = set()
     if not isinstance(entities, dict):
         return mentions
     for group, role in mapping.items():
@@ -1670,7 +1689,9 @@ def audit_candidate_ledger_against_gold(
     decision_ledger_path=None,
 ):
     """Audit pre/post-validator frontier mentions against completed issue gold."""
-    from ragflow_style_pipeline.sag_semantic_llm import _validate_with_sanitation
+    from ragflow_style_pipeline.sag_semantic_llm import (
+        _validate_configured_with_sanitation,
+    )
 
     gold_validation = validate_gold_annotations(gold_path, require_complete=True)
     if not gold_validation["ready_for_evaluation"]:
@@ -1777,11 +1798,12 @@ def audit_candidate_ledger_against_gold(
             candidate_entry.get("ledger_sequence"),
         )
         if key not in validation_cache:
-            validation_cache[key] = _validate_with_sanitation(
+            validation_cache[key] = _validate_configured_with_sanitation(
                 orders[identity],
                 candidate_entry["candidate"],
                 candidate_entry.get("parse_warnings")
                 if isinstance(candidate_entry.get("parse_warnings"), list) else [],
+                {"output_schema_version": _text(candidate_entry.get("output_schema_version"))},
             )
         return validation_cache[key]
 
@@ -1949,7 +1971,10 @@ def audit_candidate_ledger_against_gold(
 
 def replay_candidate_ledger(input_path, candidate_ledger_path):
     """Re-run the current deterministic validator without invoking a model."""
-    from ragflow_style_pipeline.sag_semantic_llm import _semantic_counts, _validate_with_sanitation
+    from ragflow_style_pipeline.sag_semantic_llm import (
+        _semantic_counts,
+        _validate_configured_with_sanitation,
+    )
 
     orders = {
         (order["doc_id"], order["content_hash"]): order
@@ -1990,17 +2015,23 @@ def replay_candidate_ledger(input_path, candidate_ledger_path):
     for identity in sorted(selected):
         _sequence, candidate = selected[identity]
         order = orders[identity]
-        semantic, validation, trace = _validate_with_sanitation(
+        semantic, validation, trace = _validate_configured_with_sanitation(
             order,
             candidate.get("candidate") if isinstance(candidate.get("candidate"), dict) else {},
             candidate.get("parse_warnings") if isinstance(candidate.get("parse_warnings"), list) else [],
+            {"output_schema_version": _text(candidate.get("output_schema_version"))},
         )
         status_counts[validation["status"]] += 1
         action_counts.update(trace.get("sanitation_warnings", []))
         rows.append({
             "schema": VALIDATOR_REPLAY_VERSION,
             "private": True,
-            "validator_version": VALIDATOR_VERSION,
+            "validator_version": (
+                ISSUE_VALIDATOR_VERSION
+                if _text(candidate.get("output_schema_version")) == ISSUE_OUTPUT_SCHEMA_VERSION
+                else VALIDATOR_VERSION
+            ),
+            "output_schema_version": _text(candidate.get("output_schema_version")) or "sag_semantic_flat_output_v1",
             "doc_id": identity[0],
             "content_hash": identity[1],
             "selected_phase": candidate.get("phase"),

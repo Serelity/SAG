@@ -16,6 +16,7 @@ def summarize(path):
     after_warnings = Counter()
     sanitation = Counter()
     entity_counts = Counter()
+    issue_counts = Counter()
     repairs = 0
     input_tokens = 0
     output_tokens = 0
@@ -50,6 +51,7 @@ def summarize(path):
                 sanitation.update(str(value) for value in row.get("sanitation_warnings", []))
                 counts = row.get("semantic_counts") if isinstance(row.get("semantic_counts"), dict) else {}
                 entity_counts.update({key: int(value) for key, value in (counts.get("entities") or {}).items()})
+                issue_counts.update({key: int(value) for key, value in (counts.get("issues") or {}).items()})
             elif event == "batch_memory":
                 memory_rows.append({
                     key: row.get(key, 0)
@@ -86,6 +88,7 @@ def summarize(path):
         "validation_after_warnings": dict(after_warnings),
         "sanitation_actions": dict(sanitation),
         "entity_counts_after_sanitation": dict(entity_counts),
+        "issue_counts_after_sanitation": dict(issue_counts),
         "repair_requested_by_primary": repairs,
         "input_tokens_total": input_tokens,
         "output_tokens_total": output_tokens,

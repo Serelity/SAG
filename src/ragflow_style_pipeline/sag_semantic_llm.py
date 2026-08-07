@@ -17,11 +17,27 @@ from pathlib import Path
 
 from ragflow_style_pipeline.sag_semantic_prompt import build_repair_prompt, build_semantic_prompt
 from ragflow_style_pipeline.sag_semantic_schema import ENTITY_GROUPS, GROUP_LIMITS, parse_semantic_json
+from ragflow_style_pipeline.sag_semantic_issue_prompt import (
+    build_issue_repair_prompt,
+    build_issue_semantic_prompt,
+)
+from ragflow_style_pipeline.sag_semantic_issue_schema import (
+    ISSUE_OUTPUT_SCHEMA_VERSION,
+    flatten_issue_counts,
+    parse_issue_semantic_json,
+)
+from ragflow_style_pipeline.sag_semantic_issue_validation import (
+    enrich_issue_semantic_output,
+    sanitize_issue_semantic_output,
+    validate_issue_semantic_output,
+)
 from ragflow_style_pipeline.sag_semantic_versions import (
     CANDIDATE_LEDGER_VERSION,
     DECISION_LEDGER_VERSION,
     DECODER_CONTRACT_VERSION,
     EVAL_MANIFEST_VERSION,
+    ISSUE_PROJECTION_VERSION,
+    ISSUE_VALIDATOR_VERSION,
     PROJECTION_VERSION,
     VALIDATOR_VERSION,
 )
@@ -140,6 +156,37 @@ def _identity(doc_id, content_hash, prompt_version, model_id):
     return "\u241f".join((doc_id, content_hash, prompt_version, model_id))
 
 
+def _uses_issue_contract(config):
+    return str(config.get("output_schema_version", "")).strip() == ISSUE_OUTPUT_SCHEMA_VERSION
+
+
+def _runtime_versions(config):
+    if _uses_issue_contract(config):
+        return ISSUE_VALIDATOR_VERSION, ISSUE_PROJECTION_VERSION
+    return VALIDATOR_VERSION, PROJECTION_VERSION
+
+
+def _build_configured_prompt(order, config):
+    return (
+        build_issue_semantic_prompt(order, config)
+        if _uses_issue_contract(config)
+        else build_semantic_prompt(order, config)
+    )
+
+
+def _build_configured_repair_prompt(order, original, errors, config):
+    return (
+        build_issue_repair_prompt(order, original, errors, config)
+        if _uses_issue_contract(config)
+        else build_repair_prompt(order, original, errors, config)
+    )
+
+
+def _parse_configured_semantic(text, config, preserve_overflow=False):
+    parser = parse_issue_semantic_json if _uses_issue_contract(config) else parse_semantic_json
+    return parser(text, preserve_overflow=preserve_overflow)
+
+
 def _atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -235,11 +282,18 @@ def _bucket_orders(orders, boundaries):
 
 
 def _record(order, semantic, validation, generation, config, repair_attempted):
+    validator_version, projection_version = _runtime_versions(config)
+    semantic_payload = (
+        {"issues": semantic.get("issues", [])}
+        if _uses_issue_contract(config)
+        else {"entities": semantic.get("entities", {})}
+    )
     return {
         "schema_version": str(config.get("schema_version", "2.0")),
+        "output_schema_version": str(config.get("output_schema_version", "sag_semantic_flat_output_v1")),
         "artifact_versions": {
-            "validator": VALIDATOR_VERSION,
-            "projection": PROJECTION_VERSION,
+            "validator": validator_version,
+            "projection": projection_version,
             "decoder_contract": str(
                 config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
             ),
@@ -254,10 +308,10 @@ def _record(order, semantic, validation, generation, config, repair_attempted):
                 if order.get(field)
             ],
         },
-        "entities": semantic.get("entities", {}),
+        **semantic_payload,
         "discourse": semantic.get("discourse", {}),
         "validation": {
-            "validator_version": VALIDATOR_VERSION,
+            "validator_version": validator_version,
             "status": validation["status"],
             "warnings": validation["warnings"],
             "repair_fields": validation["repair_fields"],
@@ -352,6 +406,42 @@ def _validate_with_sanitation(order, semantic, parse_warnings):
     return cleaned, cleaned_validation, trace
 
 
+def _validate_configured_with_sanitation(order, semantic, parse_warnings, config):
+    if not _uses_issue_contract(config):
+        return _validate_with_sanitation(order, semantic, parse_warnings)
+    semantic, enrichment_actions = enrich_issue_semantic_output(
+        order, semantic, parse_warnings
+    )
+    validation = validate_issue_semantic_output(order, semantic, parse_warnings)
+    trace = {
+        "parse_warnings": list(parse_warnings or []),
+        "validation_before": validation,
+        "sanitation_warnings": list(enrichment_actions),
+    }
+    cleaned, current = semantic, validation
+    actions = list(enrichment_actions)
+    for _pass in range(3):
+        next_cleaned, pass_actions = sanitize_issue_semantic_output(
+            cleaned, current["warnings"], order=order
+        )
+        for action in pass_actions:
+            if action not in actions:
+                actions.append(action)
+        if not pass_actions or next_cleaned == cleaned:
+            break
+        cleaned = next_cleaned
+        current = validate_issue_semantic_output(order, cleaned, parse_warnings)
+    if current["status"] in {"accepted", "accepted_with_warnings"} and actions:
+        final_warnings = list(actions)
+        for warning in current["warnings"]:
+            if warning not in final_warnings:
+                final_warnings.append(warning)
+        current = {**current, "status": "accepted_with_warnings", "warnings": final_warnings}
+    trace["sanitation_warnings"] = actions
+    trace["validation_after"] = current
+    return cleaned, current, trace
+
+
 def _diagnostic_identity(order):
     value = f"{order.get('doc_id', '')}:{order.get('content_hash', '')}"
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
@@ -360,7 +450,9 @@ def _diagnostic_identity(order):
 def _semantic_counts(semantic):
     entities = semantic.get("entities") if isinstance(semantic, dict) else {}
     discourse = semantic.get("discourse") if isinstance(semantic, dict) else {}
+    issue_counts = flatten_issue_counts(semantic) if isinstance(semantic, dict) else {}
     return {
+        "issues": issue_counts,
         "entities": {
             group: len(entities.get(group, [])) if isinstance(entities, dict) and isinstance(entities.get(group), list) else 0
             for group in ENTITY_GROUPS
@@ -392,6 +484,7 @@ def _private_candidate_entry(
         "ledger_sequence": ledger_sequence,
         "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
         "prompt_version": str(config.get("prompt_version", "sag_semantic_v7")),
+        "output_schema_version": str(config.get("output_schema_version", "sag_semantic_flat_output_v1")),
         "decoder_contract_version": str(
             config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
         ),
@@ -412,10 +505,14 @@ def _private_decision_entry(
 ):
     before = trace.get("validation_before") if isinstance(trace, dict) else {}
     after = trace.get("validation_after") if isinstance(trace, dict) else {}
+    issue_contract = (
+        isinstance(final_semantic, dict)
+        and final_semantic.get("output_schema") == ISSUE_OUTPUT_SCHEMA_VERSION
+    )
     return {
         "schema": DECISION_LEDGER_VERSION,
         "private": True,
-        "validator_version": VALIDATOR_VERSION,
+        "validator_version": ISSUE_VALIDATOR_VERSION if issue_contract else VALIDATOR_VERSION,
         "doc_id": order.get("doc_id", ""),
         "content_hash": order.get("content_hash", ""),
         "phase": phase,
@@ -472,6 +569,17 @@ def _run_generator_with_diagnostics(
         raise
 
 
+def _prompt_messages(prompt):
+    if isinstance(prompt, list) and all(
+        isinstance(item, dict)
+        and item.get("role") in {"system", "user", "assistant"}
+        and isinstance(item.get("content"), str)
+        for item in prompt
+    ):
+        return prompt
+    return [{"role": "user", "content": str(prompt)}]
+
+
 def load_transformers_generator(
     model_path, enable_thinking=False, attn_implementation="sdpa", cache_implementation="dynamic",
 ):
@@ -506,9 +614,8 @@ def load_transformers_generator(
         torch.cuda.reset_peak_memory_stats()
 
     def generate(prompts, max_new_tokens=512, temperature=0.0):
-        messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
         input_texts = []
-        for item in messages:
+        for item in (_prompt_messages(prompt) for prompt in prompts):
             try:
                 input_texts.append(tokenizer.apply_chat_template(
                     item, tokenize=False, add_generation_prompt=True,
@@ -611,7 +718,7 @@ def load_vllm_generator(
     def generate(prompts, max_new_tokens=512, temperature=0.0):
         input_texts = []
         for prompt in prompts:
-            messages = [{"role": "user", "content": prompt}]
+            messages = _prompt_messages(prompt)
             try:
                 input_texts.append(tokenizer.apply_chat_template(
                     messages, tokenize=False, add_generation_prompt=True,
@@ -712,11 +819,31 @@ def _quality_report(records, rejects):
     warning_counts = Counter(
         warning for row in records for warning in row.get("validation", {}).get("warnings", [])
     )
-    group_counts = {group: [len(row.get("entities", {}).get(group, [])) for row in records] for group in ENTITY_GROUPS}
-    empty_entity_records = sum(
-        not any(row.get("entities", {}).get(group, []) for group in ENTITY_GROUPS)
-        for row in records
-    )
+
+    def compatibility_counts(row):
+        issue_counts = flatten_issue_counts(row)
+        if issue_counts.get("issues"):
+            return {
+                "problem_objects": issue_counts["objects"],
+                "problem_behaviors": issue_counts["problem_behaviors"],
+                "roads": issue_counts["roads"],
+                "intersections": issue_counts["intersections"],
+                "pois": issue_counts["pois"],
+            }
+        entities = row.get("entities", {})
+        return {
+            group: len(entities.get(group, [])) if isinstance(entities, dict) and isinstance(entities.get(group), list) else 0
+            for group in ENTITY_GROUPS
+        }
+
+    per_record_counts = [compatibility_counts(row) for row in records]
+    group_counts = {
+        group: [counts[group] for counts in per_record_counts]
+        for group in ENTITY_GROUPS
+    }
+    empty_entity_records = sum(not any(counts.values()) for counts in per_record_counts)
+    issue_counts = [flatten_issue_counts(row) for row in records]
+    issue_contract_records = sum(counts.get("issues", 0) > 0 for counts in issue_counts)
     intent_records = sum(bool(row.get("discourse", {}).get("intents", [])) for row in records)
     return {
         "records": len(records),
@@ -728,6 +855,20 @@ def _quality_report(records, rejects):
             for group, counts in group_counts.items()
         },
         "entity_count_distributions": {group: dict(Counter(counts)) for group, counts in group_counts.items()},
+        "issue_contract_records": issue_contract_records,
+        "issue_count_distribution": dict(Counter(
+            counts.get("issues", 0) for counts in issue_counts
+        )),
+        "issue_role_coverage": {
+            role: (
+                sum(counts.get(role, 0) > 0 for counts in issue_counts) / issue_contract_records
+                if issue_contract_records else 0.0
+            )
+            for role in (
+                "objects", "problem_behaviors", "question_focus", "request_actions",
+                "roads", "intersections", "pois",
+            )
+        },
         "all_entities_empty_count": empty_entity_records,
         "all_entities_empty_rate": empty_entity_records / len(records) if records else 0.0,
         "intent_coverage": intent_records / len(records) if records else 0.0,
@@ -736,7 +877,9 @@ def _quality_report(records, rejects):
         ),
         "canonical_differs_from_surface": sum(
             item.get("canonical") != item.get("surface")
-            for row in records for group in ENTITY_GROUPS for item in row.get("entities", {}).get(group, [])
+            for row in records if not row.get("issues")
+            for group in ENTITY_GROUPS
+            for item in row.get("entities", {}).get(group, [])
         ),
         "intent_conflict_count": 0,
         "json_recovery_count": sum(
@@ -913,6 +1056,7 @@ def run_semantic_extraction(
     candidate_entries_written = 0
     decision_entries_written = 0
     ordered_pending = _bucket_orders(pending, config.get("length_bucket_boundaries", [600, 1400]))
+    validator_version, projection_version = _runtime_versions(config)
     _append_diagnostic(diagnostic_path, {
         "event": "run_started", "ts": _utc_now(), "schema": "privacy_safe_diagnostics_v1",
         "input_records_scanned": input_records_scanned,
@@ -925,8 +1069,9 @@ def run_semantic_extraction(
         "max_new_tokens": int(config.get("max_new_tokens", 512)),
         "repair_max_new_tokens": int(config.get("repair_max_new_tokens", config.get("max_new_tokens", 512))),
         "prompt_version": prompt_version, "model": model_id, "backend": backend,
-        "validator_version": VALIDATOR_VERSION,
-        "projection_version": PROJECTION_VERSION,
+        "output_schema_version": str(config.get("output_schema_version", "sag_semantic_flat_output_v1")),
+        "validator_version": validator_version,
+        "projection_version": projection_version,
         "decoder_contract_version": str(
             config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
         ),
@@ -997,7 +1142,9 @@ def run_semantic_extraction(
             repair_batch_start = repair_requests
             prompt_started = time.perf_counter()
             repair_prompts = [
-                build_repair_prompt(order, primary["text"], validation["warnings"], config)
+                _build_configured_repair_prompt(
+                    order, primary["text"], validation["warnings"], config
+                )
                 for order, primary, _semantic, validation in queued
             ]
             stage_seconds["prompt_build"] += time.perf_counter() - prompt_started
@@ -1012,10 +1159,12 @@ def run_semantic_extraction(
             generation_rows.extend(repair_results)
             for (order, primary, _semantic, first_validation), repaired in zip(queued, repair_results):
                 validation_started = time.perf_counter()
-                candidate, parse_warnings = parse_semantic_json(
-                    repaired["text"], preserve_overflow=True
+                candidate, parse_warnings = _parse_configured_semantic(
+                    repaired["text"], config, preserve_overflow=True
                 )
-                semantic, validation, trace = _validate_with_sanitation(order, candidate, parse_warnings)
+                semantic, validation, trace = _validate_configured_with_sanitation(
+                    order, candidate, parse_warnings, config
+                )
                 stage_seconds["validation"] += time.perf_counter() - validation_started
                 queue_private_audit(
                     order, "repair", candidate, parse_warnings, repaired,
@@ -1047,7 +1196,7 @@ def run_semantic_extraction(
         indexed_batch = ordered_pending[batch_start:batch_start + batch_size]
         batch = [order for _index, order in indexed_batch]
         prompt_started = time.perf_counter()
-        primary_prompts = [build_semantic_prompt(order, config) for order in batch]
+        primary_prompts = [_build_configured_prompt(order, config) for order in batch]
         stage_seconds["prompt_build"] += time.perf_counter() - prompt_started
         generation_started = time.perf_counter()
         generated = _run_generator_with_diagnostics(
@@ -1060,10 +1209,12 @@ def run_semantic_extraction(
         generation_rows.extend(generated)
         for order, result in zip(batch, generated):
             validation_started = time.perf_counter()
-            candidate, parse_warnings = parse_semantic_json(
-                result["text"], preserve_overflow=True
+            candidate, parse_warnings = _parse_configured_semantic(
+                result["text"], config, preserve_overflow=True
             )
-            semantic, validation, trace = _validate_with_sanitation(order, candidate, parse_warnings)
+            semantic, validation, trace = _validate_configured_with_sanitation(
+                order, candidate, parse_warnings, config
+            )
             stage_seconds["validation"] += time.perf_counter() - validation_started
             queue_private_audit(
                 order, "primary", candidate, parse_warnings, result,
@@ -1138,8 +1289,9 @@ def run_semantic_extraction(
         "model": model_id,
         "run_attempt_id": run_attempt_id,
         "prompt_version": prompt_version,
-        "validator_version": VALIDATOR_VERSION,
-        "projection_version": PROJECTION_VERSION,
+        "output_schema_version": str(config.get("output_schema_version", "sag_semantic_flat_output_v1")),
+        "validator_version": validator_version,
+        "projection_version": projection_version,
         "decoder_contract_version": str(
             config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
         ),
