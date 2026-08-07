@@ -72,13 +72,21 @@ def _member(item):
     }
 
 
-def _members(value, warnings, path, limit, preserve_overflow):
+def _members(
+    value, warnings, path, limit, preserve_overflow, preserve_string_members=False,
+):
     if not isinstance(value, list):
         _warn(warnings, f"malformed_issue_group:{path}")
         return []
     output = []
     for index, item in enumerate(value):
-        normalized = _member(item)
+        if preserve_string_members and isinstance(item, str) and item:
+            # v8_dev2 may retain this as an untrusted candidate.  The validator
+            # accepts it only when the exact string occurs in a clean field.
+            normalized = {"surface": item, "source_field": "", "evidence": item}
+            _warn(warnings, f"string_issue_member_candidate:{path}:{index}")
+        else:
+            normalized = _member(item)
         if normalized is None:
             _warn(warnings, f"malformed_issue_member:{path}:{index}")
             continue
@@ -109,7 +117,7 @@ def _locations(value, warnings, path, preserve_overflow):
     return output if preserve_overflow else output[:limit]
 
 
-def _issues(value, warnings, preserve_overflow):
+def _issues(value, warnings, preserve_overflow, preserve_string_members=False):
     raw = value.get("issues")
     if not isinstance(raw, list):
         _warn(warnings, "malformed_issues")
@@ -127,7 +135,7 @@ def _issues(value, warnings, preserve_overflow):
         for group in ISSUE_GROUPS[:-1]:
             normalized[group] = _members(
                 issue.get(group, []), warnings, f"issues.{index}.{group}",
-                ISSUE_GROUP_LIMITS[group], preserve_overflow,
+                ISSUE_GROUP_LIMITS[group], preserve_overflow, preserve_string_members,
             )
         normalized["locations"] = _locations(
             issue.get("locations", []), warnings, f"issues.{index}.locations",
@@ -215,7 +223,7 @@ def _urgency(value, warnings):
     return {"level": level, "source_field": field, "evidence": evidence}
 
 
-def _normalize(value, preserve_overflow=False):
+def _normalize(value, preserve_overflow=False, preserve_string_members=False):
     warnings = []
     value = _without_confidence(value) if isinstance(value, dict) else {}
     discourse = value.get("discourse")
@@ -226,7 +234,10 @@ def _normalize(value, preserve_overflow=False):
     return {
         "output_schema": ISSUE_OUTPUT_SCHEMA_VERSION,
         "event_summary": _text(value.get("event_summary")),
-        "issues": _issues(value, warnings, preserve_overflow),
+        "issues": _issues(
+            value, warnings, preserve_overflow,
+            preserve_string_members=preserve_string_members,
+        ),
         "discourse": {
             "intents": _intents(discourse.get("intents", []), warnings),
             "emotions": _emotions(discourse.get("emotions", []), warnings),
@@ -241,7 +252,9 @@ def normalize_issue_semantic_output(value):
     return normalized
 
 
-def parse_issue_semantic_json(text, preserve_overflow=False):
+def parse_issue_semantic_json(
+    text, preserve_overflow=False, preserve_string_members=False,
+):
     """Use the proven v7 tolerant JSON loader, then normalize the issue contract."""
     if not isinstance(text, str):
         return normalize_issue_semantic_output({}), ["json_parse_failed"]
@@ -249,7 +262,11 @@ def parse_issue_semantic_json(text, preserve_overflow=False):
         value, recovery_warning = _load_complete_object(candidate)
         if value is None:
             continue
-        normalized, warnings = _normalize(value, preserve_overflow=bool(preserve_overflow))
+        normalized, warnings = _normalize(
+            value,
+            preserve_overflow=bool(preserve_overflow),
+            preserve_string_members=bool(preserve_string_members),
+        )
         if recovery_warning:
             warnings.insert(0, recovery_warning)
         return normalized, warnings

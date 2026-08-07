@@ -104,13 +104,25 @@ _EXAMPLES = """边界示例（解释归组，最终仍输出完整骨架）：
 
 输出前只在内部检查：现实关注点数量；是否误合并或过拆；problem/question/request 角色；地点归属；每个 surface/field/evidence；discourse 是否有直接证据。不要输出检查过程。"""
 
+_DEV2_MEMBER_FORMAT = """数组元素格式（必须逐项输出对象，绝对不能输出字符串数组）：
+- objects/problem_behaviors/question_focus/request_actions：[{"surface":"原文短语","field":"case_content_clean","evidence":"包含该短语的连续原文"}]
+- locations：[{"type":"road","surface":"原文地点","field":"case_content_clean","evidence":"包含该地点的连续原文"}]
+- intents：[{"label":"咨询","field":"case_content_clean","evidence":"咨询"}]
+- emotions：[{"label":"不满","intensity":2,"field":"case_content_clean","evidence":"明确表达不满的连续原文"}]
+例如 objects 必须是 [{"surface":"路灯","field":"case_content_clean","evidence":"路灯"}]，不能是 ["路灯"]；其他 issue 成员数组同理。示例中的值仅演示结构，不得复制到无此原文的工单。"""
+
+
+def _is_dev2(config):
+    return isinstance(config, dict) and config.get("prompt_version") == "sag_semantic_v8_dev2"
+
 
 def build_issue_semantic_prompt(order, config):
     """Return explicit system/user messages for the v8 primary request."""
     skeleton = json.dumps(FINAL_ISSUE_JSON_SKELETON, ensure_ascii=False, separators=(",", ":"))
     payload = json.dumps(_payload(order, config), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    format_rules = "\n\n" + _DEV2_MEMBER_FORMAT if _is_dev2(config) else ""
     return [
-        {"role": "system", "content": _RULES + "\n\n" + _EXAMPLES},
+        {"role": "system", "content": _RULES + format_rules + "\n\n" + _EXAMPLES},
         {
             "role": "user",
             "content": (
@@ -126,6 +138,7 @@ def build_issue_repair_prompt(order, original_output, errors, config):
     """Return an independent repair instruction; never ask for new facts."""
     skeleton = json.dumps(FINAL_ISSUE_JSON_SKELETON, ensure_ascii=False, separators=(",", ":"))
     payload = json.dumps(_payload(order, config), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    format_rules = "\n" + _DEV2_MEMBER_FORMAT if _is_dev2(config) else ""
     return [
         {
             "role": "system",
@@ -134,6 +147,7 @@ def build_issue_repair_prompt(order, original_output, errors, config):
                 "只修复整单结构、枚举、field/evidence、空 issue 或明显角色错误；"
                 "不得添加 clean fields 中没有的新事实。无可靠证据的可选候选应删除。"
                 "不要输出解释、Markdown、思维链、canonical、confidence、issue_id 或 null。"
+                + format_rules
             ),
         },
         {

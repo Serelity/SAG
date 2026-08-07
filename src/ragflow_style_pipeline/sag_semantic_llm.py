@@ -38,6 +38,7 @@ from ragflow_style_pipeline.sag_semantic_versions import (
     EVAL_MANIFEST_VERSION,
     ISSUE_PROJECTION_VERSION,
     ISSUE_VALIDATOR_VERSION,
+    ISSUE_VALIDATOR_VERSION_V2,
     PROJECTION_VERSION,
     VALIDATOR_VERSION,
 )
@@ -162,7 +163,10 @@ def _uses_issue_contract(config):
 
 def _runtime_versions(config):
     if _uses_issue_contract(config):
-        return ISSUE_VALIDATOR_VERSION, ISSUE_PROJECTION_VERSION
+        validator = str(config.get("validator_version", ISSUE_VALIDATOR_VERSION)).strip()
+        if validator not in {ISSUE_VALIDATOR_VERSION, ISSUE_VALIDATOR_VERSION_V2}:
+            raise ValueError("unsupported_issue_validator_version")
+        return validator, ISSUE_PROJECTION_VERSION
     return VALIDATOR_VERSION, PROJECTION_VERSION
 
 
@@ -183,8 +187,14 @@ def _build_configured_repair_prompt(order, original, errors, config):
 
 
 def _parse_configured_semantic(text, config, preserve_overflow=False):
-    parser = parse_issue_semantic_json if _uses_issue_contract(config) else parse_semantic_json
-    return parser(text, preserve_overflow=preserve_overflow)
+    if _uses_issue_contract(config):
+        validator_version, _projection_version = _runtime_versions(config)
+        return parse_issue_semantic_json(
+            text,
+            preserve_overflow=preserve_overflow,
+            preserve_string_members=validator_version == ISSUE_VALIDATOR_VERSION_V2,
+        )
+    return parse_semantic_json(text, preserve_overflow=preserve_overflow)
 
 
 def _atomic_json(path, value):
@@ -409,8 +419,10 @@ def _validate_with_sanitation(order, semantic, parse_warnings):
 def _validate_configured_with_sanitation(order, semantic, parse_warnings, config):
     if not _uses_issue_contract(config):
         return _validate_with_sanitation(order, semantic, parse_warnings)
+    validator_version, _projection_version = _runtime_versions(config)
     semantic, enrichment_actions = enrich_issue_semantic_output(
-        order, semantic, parse_warnings
+        order, semantic, parse_warnings,
+        recover_surface_grounding=validator_version == ISSUE_VALIDATOR_VERSION_V2,
     )
     validation = validate_issue_semantic_output(order, semantic, parse_warnings)
     trace = {
@@ -485,6 +497,7 @@ def _private_candidate_entry(
         "model": str(config.get("model_id", "Qwen/Qwen3-4B")),
         "prompt_version": str(config.get("prompt_version", "sag_semantic_v7")),
         "output_schema_version": str(config.get("output_schema_version", "sag_semantic_flat_output_v1")),
+        "validator_version": _runtime_versions(config)[0],
         "decoder_contract_version": str(
             config.get("decoder_contract_version", DECODER_CONTRACT_VERSION)
         ),
@@ -500,7 +513,7 @@ def _private_candidate_entry(
 
 
 def _private_decision_entry(
-    order, phase, final_semantic, validation, trace,
+    order, phase, final_semantic, validation, trace, config,
     run_attempt_id, ledger_sequence,
 ):
     before = trace.get("validation_before") if isinstance(trace, dict) else {}
@@ -509,10 +522,11 @@ def _private_decision_entry(
         isinstance(final_semantic, dict)
         and final_semantic.get("output_schema") == ISSUE_OUTPUT_SCHEMA_VERSION
     )
+    validator_version = _runtime_versions(config)[0] if issue_contract else VALIDATOR_VERSION
     return {
         "schema": DECISION_LEDGER_VERSION,
         "private": True,
-        "validator_version": ISSUE_VALIDATOR_VERSION if issue_contract else VALIDATOR_VERSION,
+        "validator_version": validator_version,
         "doc_id": order.get("doc_id", ""),
         "content_hash": order.get("content_hash", ""),
         "phase": phase,
@@ -1115,7 +1129,7 @@ def run_semantic_extraction(
             decision_ledger_sequence += 1
             pending_decision_entries.append(
                 _private_decision_entry(
-                    order, phase, final_semantic, validation, trace,
+                    order, phase, final_semantic, validation, trace, config,
                     run_attempt_id, decision_ledger_sequence,
                 )
             )

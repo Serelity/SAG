@@ -109,7 +109,9 @@ def _deduplicate(issue, issue_index, actions):
         issue[group] = kept
 
 
-def enrich_issue_semantic_output(order, semantic, parse_warnings=None):
+def enrich_issue_semantic_output(
+    order, semantic, parse_warnings=None, recover_surface_grounding=False,
+):
     """Recover only source fields and direct discourse proven by clean text."""
     del parse_warnings
     order = order if isinstance(order, dict) else {}
@@ -126,12 +128,23 @@ def enrich_issue_semantic_output(order, semantic, parse_warnings=None):
             for member_index, item in enumerate(items):
                 if not isinstance(item, dict):
                     continue
+                path = _path(issue_index, group, member_index)
                 evidence = _text(item.get("evidence"))
-                if _source_field(item) not in SOURCE_FIELDS and evidence:
-                    field = _evidence_field(order, evidence)
-                    if field:
-                        item["source_field"] = field
-                        _add(actions, f"recovered_issue_source:{_path(issue_index, group, member_index)}")
+                field = _source_field(item)
+                if field not in SOURCE_FIELDS and evidence:
+                    recovered_field = _evidence_field(order, evidence)
+                    if recovered_field:
+                        item["source_field"] = recovered_field
+                        field = recovered_field
+                        _add(actions, f"recovered_issue_source:{path}")
+                source = _text(order.get(field)) if field in SOURCE_FIELDS else ""
+                if recover_surface_grounding and not _contains(source, evidence):
+                    surface = _text(item.get("surface"))
+                    recovered_field = _evidence_field(order, surface) if surface else ""
+                    if recovered_field:
+                        item["source_field"] = recovered_field
+                        item["evidence"] = surface
+                        _add(actions, f"recovered_issue_surface_grounding:{path}")
         _deduplicate(issue, issue_index, actions)
 
     discourse = cleaned.get("discourse") if isinstance(cleaned.get("discourse"), dict) else {}

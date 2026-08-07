@@ -1803,7 +1803,11 @@ def audit_candidate_ledger_against_gold(
                 candidate_entry["candidate"],
                 candidate_entry.get("parse_warnings")
                 if isinstance(candidate_entry.get("parse_warnings"), list) else [],
-                {"output_schema_version": _text(candidate_entry.get("output_schema_version"))},
+                {
+                    "output_schema_version": _text(candidate_entry.get("output_schema_version")),
+                    "validator_version": _text(candidate_entry.get("validator_version"))
+                    or ISSUE_VALIDATOR_VERSION,
+                },
             )
         return validation_cache[key]
 
@@ -2019,7 +2023,11 @@ def replay_candidate_ledger(input_path, candidate_ledger_path):
             order,
             candidate.get("candidate") if isinstance(candidate.get("candidate"), dict) else {},
             candidate.get("parse_warnings") if isinstance(candidate.get("parse_warnings"), list) else [],
-            {"output_schema_version": _text(candidate.get("output_schema_version"))},
+            {
+                "output_schema_version": _text(candidate.get("output_schema_version")),
+                "validator_version": _text(candidate.get("validator_version"))
+                or ISSUE_VALIDATOR_VERSION,
+            },
         )
         status_counts[validation["status"]] += 1
         action_counts.update(trace.get("sanitation_warnings", []))
@@ -2027,7 +2035,7 @@ def replay_candidate_ledger(input_path, candidate_ledger_path):
             "schema": VALIDATOR_REPLAY_VERSION,
             "private": True,
             "validator_version": (
-                ISSUE_VALIDATOR_VERSION
+                _text(candidate.get("validator_version")) or ISSUE_VALIDATOR_VERSION
                 if _text(candidate.get("output_schema_version")) == ISSUE_OUTPUT_SCHEMA_VERSION
                 else VALIDATOR_VERSION
             ),

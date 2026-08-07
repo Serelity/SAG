@@ -95,6 +95,24 @@ class TestIssueSchema(unittest.TestCase):
         self.assertNotIn("issue_id", repr(parsed))
         self.assertEqual(flatten_issue_counts(parsed)["request_actions"], 1)
 
+    def test_dev2_preserves_string_members_only_as_untrusted_candidates(self):
+        raw = json.dumps(semantic([{
+            "time_scope": "current", "objects": ["路灯", "虚构对象"],
+            "problem_behaviors": ["连续三天不亮"], "question_focus": [],
+            "request_actions": ["维修路灯"], "locations": [],
+        }]), ensure_ascii=False)
+        dev1, dev1_warnings = parse_issue_semantic_json(raw)
+        dev2, dev2_warnings = parse_issue_semantic_json(
+            raw, preserve_string_members=True,
+        )
+        self.assertEqual(dev1["issues"][0]["objects"], [])
+        self.assertIn("malformed_issue_member:issues.0.objects:0", dev1_warnings)
+        self.assertEqual(
+            dev2["issues"][0]["objects"][0],
+            {"surface": "路灯", "source_field": "", "evidence": "路灯"},
+        )
+        self.assertIn("string_issue_member_candidate:issues.0.objects:0", dev2_warnings)
+
     def test_tolerant_json_recovery_does_not_recover_truncation(self):
         recovered, warnings = parse_issue_semantic_json(
             '{"event_summary":"ok","issues":[],"discourse":{},}'
@@ -107,6 +125,21 @@ class TestIssueSchema(unittest.TestCase):
 
 
 class TestIssuePrompt(unittest.TestCase):
+    def test_v8_dev2_config_changes_prompt_and_validator_not_schema_or_projection(self):
+        root = Path(__file__).parents[1]
+        dev1 = json.loads((root / "configs" / "sag_semantic_extraction_qwen3_4b_v8_dev1.json").read_text(encoding="utf-8"))
+        dev2 = json.loads((root / "configs" / "sag_semantic_extraction_qwen3_4b_v8_dev2.json").read_text(encoding="utf-8"))
+        self.assertEqual(dev2["output_schema_version"], ISSUE_OUTPUT_SCHEMA_VERSION)
+        self.assertEqual(dev2["prompt_version"], "sag_semantic_v8_dev2")
+        self.assertEqual(dev2["validator_version"], "sag_semantic_issue_validator_v2")
+        for key in (
+            "decoder_contract_version", "model_id", "enable_thinking",
+            "max_input_chars", "max_new_tokens", "repair_max_new_tokens",
+            "max_repairs_per_order", "vllm_max_model_len", "vllm_max_num_seqs",
+            "vllm_enable_prefix_caching", "vllm_enable_chunked_prefill",
+        ):
+            self.assertEqual(dev2[key], dev1[key], key)
+
     def test_v8_runtime_config_is_frozen_for_first_development_smoke(self):
         path = Path(__file__).parents[1] / "configs" / "sag_semantic_extraction_qwen3_4b_v8_dev1.json"
         config = json.loads(path.read_text(encoding="utf-8"))
@@ -122,6 +155,27 @@ class TestIssuePrompt(unittest.TestCase):
         self.assertEqual(config["vllm_max_num_seqs"], 32)
         self.assertFalse(config["vllm_enable_prefix_caching"])
         self.assertFalse(config["vllm_enable_chunked_prefill"])
+
+    def test_dev2_prompt_and_repair_show_nonempty_member_objects(self):
+        order = {"case_content_clean": "和平路路灯不亮，希望维修路灯"}
+        config = {"prompt_version": "sag_semantic_v8_dev2", "max_input_chars": 2200}
+        primary = "\n".join(
+            item["content"] for item in build_issue_semantic_prompt(order, config)
+        )
+        repair = "\n".join(
+            item["content"] for item in build_issue_repair_prompt(
+                order, '{"objects":["路灯"]}',
+                ["string_issue_member_candidate:issues.0.objects:0"], config,
+            )
+        )
+        for prompt in (primary, repair):
+            self.assertIn('objects 必须是 [{"surface":"路灯"', prompt)
+            self.assertIn('不能是 ["路灯"]', prompt)
+            self.assertIn('"type":"road","surface":"原文地点"', prompt)
+        dev1 = "\n".join(
+            item["content"] for item in build_issue_semantic_prompt(order, {})
+        )
+        self.assertNotIn('不能是 ["路灯"]', dev1)
 
     def test_prompt_teaches_issue_grouping_and_excludes_metadata(self):
         messages = build_issue_semantic_prompt({
@@ -206,6 +260,59 @@ class TestIssueValidation(unittest.TestCase):
         self.assertEqual(after["status"], "accepted")
         self.assertEqual([x["surface"] for x in cleaned["issues"][0]["objects"]], ["路灯"])
         self.assertIn("dropped_invalid_candidate:issues.0.objects.1", actions)
+
+    def test_dev2_recovers_only_exactly_grounded_string_members(self):
+        raw = json.dumps(semantic([{
+            "time_scope": "current", "objects": ["路灯", "虚构对象"],
+            "problem_behaviors": ["连续三天不亮"], "question_focus": [],
+            "request_actions": ["维修路灯"], "locations": [],
+        }]), ensure_ascii=False)
+        parsed, warnings = parse_issue_semantic_json(
+            raw, preserve_string_members=True,
+        )
+        enriched, actions = enrich_issue_semantic_output(
+            self.order, parsed, warnings, recover_surface_grounding=True,
+        )
+        before = validate_issue_semantic_output(self.order, enriched, warnings)
+        cleaned, drops = sanitize_issue_semantic_output(
+            enriched, before["warnings"], self.order,
+        )
+        after = validate_issue_semantic_output(self.order, cleaned, warnings)
+        self.assertEqual(
+            [item["surface"] for item in cleaned["issues"][0]["objects"]],
+            ["路灯"],
+        )
+        self.assertEqual(cleaned["issues"][0]["objects"][0]["source_field"], "case_content_clean")
+        self.assertEqual(cleaned["issues"][0]["request_actions"][0]["source_field"], "case_goal_clean")
+        self.assertIn("recovered_issue_source:issues.0.objects.0", actions)
+        self.assertIn("dropped_invalid_candidate:issues.0.objects.1", drops)
+        self.assertEqual(after["status"], "accepted_with_warnings")
+
+    def test_dev2_recovers_wrong_location_grounding_only_from_exact_surface(self):
+        self.order["address_detail_clean"] = "和平路88号"
+        value = semantic([{
+            "time_scope": "current", "objects": [member("路灯")],
+            "problem_behaviors": [member("连续三天不亮")],
+            "question_focus": [], "request_actions": [],
+            "locations": [{
+                "type": "road", "surface": "和平路",
+                "field": "case_goal_clean", "evidence": "错误证据",
+            }],
+        }])
+        parsed, warnings = parse_issue_semantic_json(json.dumps(value, ensure_ascii=False))
+        enriched, actions = enrich_issue_semantic_output(
+            self.order, parsed, warnings, recover_surface_grounding=True,
+        )
+        location = enriched["issues"][0]["locations"][0]
+        self.assertEqual(location["source_field"], "case_content_clean")
+        self.assertEqual(location["evidence"], "和平路")
+        self.assertIn(
+            "recovered_issue_surface_grounding:issues.0.locations.0", actions,
+        )
+        self.assertEqual(
+            validate_issue_semantic_output(self.order, enriched, warnings)["status"],
+            "accepted",
+        )
 
     def test_empty_issue_requires_whole_record_repair(self):
         parsed, warnings = parse_issue_semantic_json(json.dumps(semantic([{

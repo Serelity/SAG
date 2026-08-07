@@ -278,3 +278,22 @@ v8 默认 `max_model_len=8192`、`max_num_seqs=32`，其 KV 上限与 v7 的 `40
 - latency、orders/s、output tokens/s、GPU peak
 
 第一轮先跑冻结的 16 条 development；后续 `v8_dev2/dev3` 仍复用这 16 条，不得换 seed 重抽。根据实际 Qwen 错误迭代，不要看到单例错误就加关键词。Prompt 冻结为 RC 后才首次打开 32 条 holdout；之后再扩大到 48/100、995 和 100k。v7 与 v8 对比必须使用相同 identity、模型和输入；只改变 schema/Prompt，并保持输出目录隔离。
+
+### 10.3 v8_dev1 development 结果与 v8_dev2
+
+首轮冻结 16 条 development 的安全聚合结果为：5 records、11 rejects、11 repairs、0 truncation，27 次 generation 均为 `finish_reason=stop`。主要错误不是 JSON、显存或 token，而是模型将 issue 的 `objects/problem_behaviors/question_focus/request_actions` 大量输出为字符串数组，导致 `malformed_issue_member` 和 `empty_issue`；repair 仍重复该结构。地点及 discourse 的不可靠 evidence 已由候选级 sanitation 删除，不是主要 reject 根因。
+
+`v8_dev2` 保持 `sag_semantic_issue_output_v1`、projection v1、decoder、token、V100 参数和冻结 development 不变，只做两项版本化修复：
+
+- Prompt 增加完整非空 member/location/discourse 对象格式，明确禁止 `["路灯"]` 式字符串数组；
+- validator 升为 `sag_semantic_issue_validator_v2`。字符串 issue member 只作为未信任候选保留，且仅当 surface 逐字存在于四个 clean fields 时确定性补 `field/evidence`；无法验证的候选仍删除。错误 location grounding 也只允许从逐字 surface 恢复。
+
+第二轮继续使用相同 `INPUT_JSONL`、相同 development manifest 和全新目录：
+
+```bash
+export BACKEND=vllm
+export RUN_DIR=/path/outside/repo/v8-dev2-smoke-001
+bash scripts/extract_semantics_v8_dev2.sh
+```
+
+不得对 v8_dev1 使用 resume，也不得打开 holdout。对比重点是 records/rejects/repairs、`malformed_issue_member`、`empty_issue`、grounded issue role coverage 以及是否出现新的过度恢复；validator 通过率仍不能当作语义 precision/recall。

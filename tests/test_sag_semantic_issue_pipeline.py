@@ -10,6 +10,16 @@ from ragflow_style_pipeline.sag_semantic_llm import run_semantic_extraction
 from ragflow_style_pipeline.sag_semantic_projection import project_semantics_file
 
 
+def string_member_output_value():
+    value = output_value()
+    for issue in value["issues"]:
+        for group in (
+            "objects", "problem_behaviors", "question_focus", "request_actions",
+        ):
+            issue[group] = [item["surface"] for item in issue[group]]
+    return value
+
+
 def output_value():
     return {
         "event_summary": "人民路路灯不亮；幸福小区垃圾堆积",
@@ -41,9 +51,10 @@ def output_value():
 
 
 class Generator:
-    def __init__(self, fail_primary=False):
+    def __init__(self, fail_primary=False, string_members=False):
         self.calls = []
         self.fail_primary = fail_primary
+        self.string_members = string_members
 
     def __call__(self, prompts, max_new_tokens, temperature):
         self.calls.append((list(prompts), max_new_tokens))
@@ -53,7 +64,8 @@ class Generator:
         repair = "你是 JSON 修复器" in prompt_text
         rows = []
         for _prompt in prompts:
-            text = '{"event_summary":' if self.fail_primary and not repair else json.dumps(output_value(), ensure_ascii=False)
+            value = string_member_output_value() if self.string_members else output_value()
+            text = '{"event_summary":' if self.fail_primary and not repair else json.dumps(value, ensure_ascii=False)
             rows.append({
                 "text": text, "input_tokens": 300, "output_tokens": 180,
                 "finish_reason": "stop", "latency_ms": 1,
@@ -72,6 +84,46 @@ class TestIssuePipeline(unittest.TestCase):
             "repair_max_new_tokens": 768, "max_repairs_per_order": 1,
             "checkpoint_every": 1,
         }
+
+    def dev2_config(self):
+        return {
+            **self.config(),
+            "prompt_version": "sag_semantic_v8_dev2",
+            "validator_version": "sag_semantic_issue_validator_v2",
+        }
+
+    def test_dev2_recovers_grounded_string_members_without_repair_and_replays_v2(self):
+        text = "人民路路灯不亮，希望维修路灯；幸福小区垃圾堆积，希望清理垃圾"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source = root / "input.jsonl"
+            source.write_text(
+                json.dumps({"doc_id": "d1", "case_content_clean": text}, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            candidate_ledger = root / "candidates.private.jsonl"
+            decision_ledger = root / "decisions.private.jsonl"
+            generator = Generator(string_members=True)
+            report = run_semantic_extraction(
+                source, root / "semantic.jsonl", root / "rejects.jsonl",
+                root / "run.json", root / "quality.json", "unused",
+                self.dev2_config(), generator=generator,
+                candidate_ledger_path=candidate_ledger,
+                decision_ledger_path=decision_ledger,
+            )
+            record = json.loads((root / "semantic.jsonl").read_text(encoding="utf-8"))
+            candidate = json.loads(candidate_ledger.read_text(encoding="utf-8"))
+            decision = json.loads(decision_ledger.read_text(encoding="utf-8"))
+            rows, replay = replay_candidate_ledger(source, candidate_ledger)
+        self.assertEqual(report["records_written"], 1)
+        self.assertEqual(report["repair_requests"], 0)
+        self.assertEqual(report["validator_version"], "sag_semantic_issue_validator_v2")
+        self.assertEqual(record["validation"]["validator_version"], "sag_semantic_issue_validator_v2")
+        self.assertEqual(record["issues"][0]["objects"][0]["surface"], "路灯")
+        self.assertEqual(candidate["validator_version"], "sag_semantic_issue_validator_v2")
+        self.assertEqual(decision["validator_version"], "sag_semantic_issue_validator_v2")
+        self.assertEqual(rows[0]["validator_version"], "sag_semantic_issue_validator_v2")
+        self.assertEqual(replay["status_counts"], {"accepted_with_warnings": 1})
 
     def test_one_primary_and_at_most_one_whole_record_repair(self):
         text = "人民路路灯不亮，希望维修路灯；幸福小区垃圾堆积，希望清理垃圾"
