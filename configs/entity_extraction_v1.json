@@ -1,0 +1,19 @@
+{
+  "pipeline_version": "entity_extraction_v1",
+  "model_name": "Qwen3-4B",
+  "batch_size": 32,
+  "primary_max_tokens": 768,
+  "repair_max_tokens": 512,
+  "max_input_chars": 2200,
+  "temperature": 0.0,
+  "seed": 0,
+  "dtype": "float16",
+  "tensor_parallel_size": 1,
+  "max_model_len": 8192,
+  "max_num_seqs": 32,
+  "gpu_memory_utilization": 0.90,
+  "enable_thinking": false,
+  "enable_prefix_caching": false,
+  "enable_chunked_prefill": false,
+  "enforce_eager": false
+}

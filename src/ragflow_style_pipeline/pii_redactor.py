@@ -1,10 +1,11 @@
-"""Utilities for removing obvious personal identifiers from order text."""
+"""Deterministic PII redaction applied before text enters a prompt."""
+
+from __future__ import annotations
 
 from collections import Counter
 import re
 
 
-PHONE_RE = re.compile(r"(?<!\d)0?1[3-9]\d{9,10}(?!\d)")
 EMAIL_RE = re.compile(
     r"(?i)(?<![A-Za-z0-9_.+-])[A-Za-z0-9_.+-]+@[A-Za-z0-9-]+"
     r"(?:\.[A-Za-z0-9-]+)+"
@@ -14,58 +15,75 @@ LABELED_LANDLINE_RE = re.compile(
 )
 LABELED_QQ_RE = re.compile(r"((?:QQ|扣扣)\s*[:：]?\s*)[1-9]\d{4,11}(?!\d)", re.I)
 LABELED_WECHAT_RE = re.compile(
-    r"((?:微信|微信号|wechat)\s*[:：]?\s*)[A-Za-z][A-Za-z0-9_-]{5,19}", re.I
+    r"((?:微信号?|wechat)\s*[:：]?\s*)[A-Za-z][A-Za-z0-9_-]{5,19}", re.I
 )
 CONTACT_NAME_RE = re.compile(
     r"((?:联系人|联络人)(?:姓名)?\s*[:：]\s*)"
-    r"(?!\[姓名\])[\u4e00-\u9fff·]{2,4}"
+    r"(?!\[姓名\])([\u4e00-\u9fff·]{2,4})"
     r"(?=[，,。；;、\s]|\[手机号\]|\d|联系电话|联系|电话|手机|$)"
 )
 CONTACT_NAME_BEFORE_PHONE_RE = re.compile(
     r"((?:联系人|联络人)(?:姓名)?\s*)"
-    r"(?![:：\s]|\[姓名\])[\u4e00-\u9fff·]{2,4}"
+    r"(?![:：\s]|\[姓名\])([\u4e00-\u9fff·]{2,4})"
     r"(?=\s*[，,]?\s*(?:0?1[3-9]\d{9,10}|\[手机号\]))"
 )
+NAME_LABEL_RE = re.compile(r"((?:姓名|市民姓名|来电人姓名)\s*[:：]\s*)(?!\[姓名\])[\u4e00-\u9fff·]{2,8}")
+PHONE_RE = re.compile(r"(?<!\d)0?1[3-9]\d{9,10}(?!\d)")
 ALNUM_ID_RE = re.compile(r"(?<![A-Za-z0-9])[A-Za-z]{1,6}\d{10,}[A-Za-z0-9]*(?![A-Za-z0-9])")
 ID_CARD_RE = re.compile(r"(?<!\d)\d{17}[\dXx](?!\d)")
 LONG_NUMBER_RE = re.compile(r"(?<!\d)\d{18,}(?!\d)")
 NUMERIC_ID_RE = re.compile(r"(?<!\d)\d{13,17}(?!\d)")
-NAME_LABEL_RE = re.compile(r"(姓名[:：]\s*)[\u4e00-\u9fff·]{2,8}")
+
+PLACEHOLDERS = frozenset(
+    {
+        "[邮箱]",
+        "[姓名]",
+        "[座机]",
+        "[QQ号]",
+        "[微信号]",
+        "[手机号]",
+        "[业务编号]",
+        "[身份证号]",
+        "[长数字编号]",
+        "[数字编号]",
+    }
+)
+PLACEHOLDER_RE = re.compile(
+    r"^(?:" + "|".join(re.escape(item) for item in sorted(PLACEHOLDERS)) + r")$"
+)
+
+# Ordered replacements are part of the redaction contract. More specific rules run first.
+_RULES = (
+    ("email", EMAIL_RE, "[邮箱]"),
+    ("contact_name", CONTACT_NAME_RE, r"\1[姓名]"),
+    ("contact_name", CONTACT_NAME_BEFORE_PHONE_RE, r"\1[姓名]"),
+    ("name", NAME_LABEL_RE, r"\1[姓名]"),
+    ("landline", LABELED_LANDLINE_RE, r"\1[座机]"),
+    ("qq", LABELED_QQ_RE, r"\1[QQ号]"),
+    ("wechat", LABELED_WECHAT_RE, r"\1[微信号]"),
+    ("phone", PHONE_RE, "[手机号]"),
+    ("alnum_id", ALNUM_ID_RE, "[业务编号]"),
+    ("id_card", ID_CARD_RE, "[身份证号]"),
+    ("long_number", LONG_NUMBER_RE, "[长数字编号]"),
+    ("numeric_id", NUMERIC_ID_RE, "[数字编号]"),
+)
 
 
-def redact_text(value):
-    """Return text with obvious phone and ID-card patterns replaced.
-
-    The function returns a pair:
-    - redacted text
-    - replacement counts, grouped by sensitive type
-    """
-    if value is None:
-        value = ""
-
-    counts = Counter()
-    text = str(value)
-    text, email_count = EMAIL_RE.subn("[邮箱]", text)
-    text, contact_name_count = CONTACT_NAME_RE.subn(r"\1[姓名]", text)
-    text, contact_phone_name_count = CONTACT_NAME_BEFORE_PHONE_RE.subn(r"\1[姓名]", text)
-    text, landline_count = LABELED_LANDLINE_RE.subn(r"\1[座机]", text)
-    text, qq_count = LABELED_QQ_RE.subn(r"\1[QQ号]", text)
-    text, wechat_count = LABELED_WECHAT_RE.subn(r"\1[微信号]", text)
-    text, phone_count = PHONE_RE.subn("[手机号]", text)
-    text, alnum_id_count = ALNUM_ID_RE.subn("[业务编号]", text)
-    text, id_card_count = ID_CARD_RE.subn("[身份证号]", text)
-    text, long_number_count = LONG_NUMBER_RE.subn("[长数字编号]", text)
-    text, numeric_id_count = NUMERIC_ID_RE.subn("[数字编号]", text)
-    text, name_count = NAME_LABEL_RE.subn(r"\1[姓名]", text)
-    counts["email"] += email_count
-    counts["contact_name"] += contact_name_count + contact_phone_name_count
-    counts["landline"] += landline_count
-    counts["qq"] += qq_count
-    counts["wechat"] += wechat_count
-    counts["phone"] += phone_count
-    counts["alnum_id"] += alnum_id_count
-    counts["id_card"] += id_card_count
-    counts["long_number"] += long_number_count
-    counts["numeric_id"] += numeric_id_count
-    counts["name"] += name_count
+def redact_text(value: object) -> tuple[str, Counter[str]]:
+    """Return redacted text and aggregate replacement counts."""
+    text = "" if value is None else str(value)
+    counts: Counter[str] = Counter()
+    for name, pattern, replacement in _RULES:
+        text, count = pattern.subn(replacement, text)
+        counts[name] += count
     return text, counts
+
+
+def residual_pii_codes(value: object) -> tuple[str, ...]:
+    """Return residual recognisable PII classes after redaction."""
+    text = "" if value is None else str(value)
+    codes = []
+    for name, pattern, _replacement in _RULES:
+        if pattern.search(text):
+            codes.append(name)
+    return tuple(dict.fromkeys(codes))

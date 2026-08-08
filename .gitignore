@@ -1,12 +1,38 @@
-# 本仓库是学习记录仓库，不保存本地运行数据、密钥或大体积产物。
+# Private source data, models and every generated run artifact.
+data/
+models/
+runs/
+outputs/
+private/
+packages/
+*.private
+*.private.*
+*.safe.json
+*.safe.jsonl
+*.jsonl
+*.quality.json
 
-# 系统与编辑器
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/
+# Model weights and large binary artifacts.
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.npy
+*.npz
+*.duckdb
+*.duckdb.wal
+*.sqlite
+*.sqlite3
+*.db
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
 
-# 密钥与本地配置
+# Secrets and local configuration.
 .env
 .env.*
 *.key
@@ -14,34 +40,23 @@ Thumbs.db
 secrets/
 credentials/
 
-# Python / Node 缓存
+# Python, Node, test and editor state.
 __pycache__/
 *.py[cod]
-node_modules/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
 .venv/
 venv/
+node_modules/
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
 
-# Docker / RAGFlow 本地运行数据
-ragflow-logs/
-mysql_data/
-minio_data/
-redis_data/
-esdata*/
-*.vhdx
-
-# 临时文件
+# Runtime logs and temporary files.
+*.log
 tmp/
 temp/
-*.log
-
-# Generated outputs: do not commit sample data, JSONL exports, or quality reports.
-data/
-models/
-outputs/
-packages/
-*.zip
-*.jsonl
-*.quality.json
-*.duckdb
-*.duckdb.wal
-*.npy
+ragflow-logs/

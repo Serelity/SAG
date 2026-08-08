@@ -1,87 +1,128 @@
-# RAGFlow 12 周学习计划
+# 12345 工单实体抽取 v1
 
-这是我的 RAGFlow 学习记录仓库。目标不是复制上游源码，而是把部署、排障、源码阅读、实验过程和阶段复盘整理成一个可复现的学习项目。
+这是一次从零重写。旧版 SAG demo、v2–v8 语义契约、Oracle、标注工作台、旧数据库与
+旧查询代码均不在本分支运行树中；历史仍保存在 Git commit 和归档 tag
+`archive/qwen-semantic-v8-dev2-20260808`。
 
-> 上游项目：[`infiniflow/ragflow`](https://github.com/infiniflow/ragflow)  
-> 当前学习版本：`v0.26.4`
+本仓库只交付代码、配置、合成测试和文档，不保存任何工单、模型、推理输出或人工标注。
 
-## 学习目标
+## 服务器前提
 
-- 在 Windows + WSL2 + Docker Desktop 环境稳定部署 RAGFlow。
-- 理解 RAGFlow 的 Docker 服务组成和启动链路。
-- 理解 RAGFlow 的核心源码结构：Web、API、RAG、DeepDoc、Agent、SDK。
-- 通过 12 周、每周 15 小时以上的节奏，形成持续可复盘的学习记录。
-- 最终把学习文档、实验记录和问题清单上传到自己的 GitHub。
-
-## 当前状态
-
-- [x] WSL2 安装完成。
-- [x] Ubuntu 24.04 LTS 发行版创建完成。
-- [x] Docker Desktop 与 WSL2 集成修复完成。
-- [x] RAGFlow `v0.26.4` CPU Docker 部署完成。
-- [x] Web 页面可访问：`http://localhost`
-- [x] API 端口可访问：`localhost:9380`
-- [x] 已确认本地 MySQL `3306` 冲突，并将 RAGFlow MySQL 暴露端口改为 `13306`。
-- [x] 已记录 `SubAPI / Responses API` 与 RAGFlow 当前 OpenAI-Compatible 接口的适配问题。
-- [x] 已完成 12345 工单 TSV 到脱敏 JSONL 的第一版数据管线。
-- [x] 已完成 1000 样本和 10 万样本的本地 BM25 风格检索 demo。
-- [ ] 配置一个同时支持 Chat Completions 与 Embeddings 的模型供应商。
-- [ ] 创建第一个数据集并完成一次文档解析实验。
-- [ ] 开始系统源码阅读。
-
-## 仓库内容
+服务器已具备以下资源，本项目不会下载、安装或删除它们：
 
 ```text
-.
-├── README.md
-├── docs/
-│   ├── 00-环境与部署记录.md
-│   ├── 01-RAGFlow项目速览.md
-│   ├── 02-12周学习计划.md
-│   ├── 03-模型配置说明.md
-│   ├── 04-排障记录.md
-│   ├── 05-源码阅读路线.md
-│   ├── 06-12345工单RAG实现方案.md
-│   └── 07-本地检索Demo.md
-├── labs/
-│   ├── README.md
-│   └── week-01.md
-└── notes/
-    └── README.md
+server-root/
+├── data/
+│   └── t_order_master.tsv
+├── models/
+│   └── Qwen3-4B/
+└── app/                    # 本 Git 分支
 ```
 
-## 本地部署摘要
+还需要：
 
-我的本地部署目录位于 WSL 内：
+- 已创建且已安装 `vllm==0.8.5`、`transformers==4.51.3` 的 Conda 环境；
+- 一张 NVIDIA V100；
+- 服务器用户对 `RUN_DIR` 有写权限；
+- 不要求代码联网。
+
+## 唯一生产链路
+
+```text
+原始 TSV
+→ 严格流式读取与坏行聚合
+→ 四个语义字段及 metadata 本地 PII 脱敏
+→ documents.private.jsonl（完整脱敏 RAG 事实源）
+→ Qwen3-4B / vLLM
+→ issues + 五类字符串数组
+→ Python Unicode 精确 grounding
+→ entities.private.jsonl（权威实体层）
+→ entity_links.private.jsonl（确定性 issue 超边投影）
+→ run.safe.json
+```
+
+模型只允许输出：
+
+```json
+{
+  "issues": [
+    {
+      "objects": [],
+      "problems": [],
+      "questions": [],
+      "locations": [],
+      "requests": []
+    }
+  ]
+}
+```
+
+每单一次 primary；只有 JSON 无效或 grounding 后整单为空时，最多一次 repair。字符串必须
+逐字来自四个脱敏字段。Python 才生成 `field/start/end/evidence`，不做模糊匹配、同义改写、
+canonical 或 confidence。
+
+## 第一次服务器验证
+
+激活服务器已有环境，在 `app/` 中执行：
 
 ```bash
-~/deploy/ragflow-v0.26.4
+conda activate <已有环境名>
+bash scripts/verify_v1.sh
 ```
 
-关键启动命令：
+该命令只运行合成测试、Python 编译检查和 Shell 静态检查，不读取真实 TSV、不加载模型。
 
-```powershell
-wsl -d RAGFlow-Ubuntu -- bash -lc "cd ~/deploy/ragflow-v0.26.4 && docker compose -f docker-compose.yml start"
+然后执行 16 条端到端 GPU smoke：
+
+```bash
+export DATA_PATH=/absolute/server-root/data/t_order_master.tsv
+export MODEL_PATH=/absolute/server-root/models/Qwen3-4B
+export RUN_DIR=/absolute/server-root/runs/entity-v1/smoke-001
+export LIMIT=16
+bash scripts/run_v1.sh
 ```
 
-关键状态检查命令：
+只回传：
 
-```powershell
-wsl -d RAGFlow-Ubuntu -- bash -lc "cd ~/deploy/ragflow-v0.26.4 && docker compose -f docker-compose.yml ps"
+- `prepare.safe.json`
+- `diagnostics.safe.jsonl`
+- `run.safe.json`
+- 终端错误码（若失败）
+
+不要回传 private JSONL、Prompt、模型原始响应或原始工单 ID。
+
+## 恢复中断运行
+
+不要重新 prepare。保持同一份代码、配置、documents 和模型：
+
+```bash
+unset LIMIT
+export RESUME=1
+export RUN_DIR=/absolute/server-root/runs/entity-v1/run-001
+bash scripts/run_v1.sh
 ```
 
-安全停止但保留数据：
+checkpoint 在模型调用前落盘，因此恢复不会重复已经开始的 primary 或 repair。若 repair 在
+GPU 调用期间中断，该单以 `repair:interrupted` 私有 reject 结束，不会发起第三次生成。
 
-```powershell
-wsl -d RAGFlow-Ubuntu -- bash -lc "cd ~/deploy/ragflow-v0.26.4 && docker compose -f docker-compose.yml stop"
+## 全量运行
+
+smoke、safe checker 和私有人工抽查通过后，使用一个新的空目录，且不要设置 `LIMIT`：
+
+```bash
+unset LIMIT RESUME
+export RUN_DIR=/absolute/server-root/runs/entity-v1/full-001
+bash scripts/run_v1.sh
 ```
 
-注意：不要使用带 `-v` 的 `docker compose down`，否则会删除数据卷。
+`LIMIT` 只用于 smoke，不是正式可重现抽样。正式抽样以后应另建显式 identity manifest。
 
-## 学习原则
+## 重要边界
 
-- 每次学习都留下记录：目标、操作、现象、结论。
-- 遇到问题先定位根因，不随机改配置。
-- 不把 API Key、密码、Cookie、Token 写进仓库。
-- 不直接修改上游源码快照，实验修改应单独记录或另开分支。
-- 先跑通 Docker 部署，再进入源码开发。
+- `documents.private.jsonl` 是完整脱敏 RAG 事实源，不能被 surface 实体图取代；
+- v1 实体保持原文 surface，不做 alias/canonical，图节点可能碎片化；
+- BM25/embedding 对完整脱敏文本的召回仍应保留；
+- validator 通过率、accepted 率和 coverage 不代表实体准确率或 RAG/SAG 收益；
+- 结构稳定后仍需私有人工实体/issue 审计和检索评测。
+
+完整设计与产物契约见 [`docs/entity-extraction-v1.md`](docs/entity-extraction-v1.md)。

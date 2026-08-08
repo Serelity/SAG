@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ragflow-style-pipeline"
+version = "1.0.0"
+description = "Private 12345 work-order entity extraction with Qwen3-4B"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "SAG project"}]
+
+[project.scripts]
+entity-extraction-v1 = "ragflow_style_pipeline.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

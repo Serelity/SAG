@@ -1,4 +1,0 @@
-id	order_id	service_object_type	case_content	case_goal	area_code_city	area_code_area	area_code_street	case_accord_type_one_name	case_accord_type_two_name	case_accord_type_three_name	order_source	order_type	order_status	call_time
-1	ORD001	求助	市民反映附近夜间摆摊扰民	希望处理占道经营	常州市	武进区	湖塘镇	城乡建设	市容管理	无照经营游商	电话	个人	100	2025-01-02 10:11:12
-2	ORD002	咨询	咨询医保政策办理条件	希望了解医保政策	常州市	市本级		民生保障	社会保障	职工医疗保险	电话	个人	100	2025-02-03 09:00:00
-3	ORD003	投诉举报	NULL	希望处理噪声问题	常州市	天宁区	茶山街道	环境保护	噪声污染	社会生活噪声	互联网	个人	31	2025-03-04 20:30:00

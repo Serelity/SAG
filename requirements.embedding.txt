@@ -1,4 +1,0 @@
-FlagEmbedding
-torch
-numpy
-duckdb
